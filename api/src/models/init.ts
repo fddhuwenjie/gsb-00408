@@ -47,7 +47,7 @@ export function initDatabase(): void {
       content_id INTEGER NOT NULL,
       channel_id INTEGER NOT NULL,
       schedule_time DATETIME NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'scheduled', 'published', 'withdrawn')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'scheduled', 'publishing', 'published', 'failed', 'withdrawn', 'pending_review')),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (content_id) REFERENCES contents(id),
@@ -110,6 +110,10 @@ export function initDatabase(): void {
       last_failure_reason TEXT,
       rate_limit_status TEXT NOT NULL DEFAULT 'normal' CHECK(rate_limit_status IN ('normal', 'limited', 'blocked')),
       responsible_person TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_heartbeat DATETIME,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      degrade_threshold INTEGER NOT NULL DEFAULT 3,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (channel_id) REFERENCES channels(id)
     );
@@ -136,7 +140,21 @@ export function initDatabase(): void {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (operator_id) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS audit_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operator_id INTEGER,
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL CHECK(target_type IN ('channel', 'schedule', 'failure_review')),
+      target_id INTEGER NOT NULL,
+      detail TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (operator_id) REFERENCES users(id)
+    );
   `);
+
+  migrateChannelHealthColumns();
+  migrateSchedulesStatusCheck();
 
   const channelHealthExists = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='channel_health'"
@@ -149,6 +167,57 @@ export function initDatabase(): void {
       FROM channels
     `);
   }
+}
+
+function migrateChannelHealthColumns(): void {
+  const columns = db.prepare("PRAGMA table_info(channel_health)").all() as { name: string }[];
+  const existing = new Set(columns.map((c) => c.name));
+
+  const migrations: Array<[string, string]> = [
+    ['enabled', 'ALTER TABLE channel_health ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'],
+    ['last_heartbeat', 'ALTER TABLE channel_health ADD COLUMN last_heartbeat DATETIME'],
+    ['consecutive_failures', 'ALTER TABLE channel_health ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0'],
+    ['degrade_threshold', 'ALTER TABLE channel_health ADD COLUMN degrade_threshold INTEGER NOT NULL DEFAULT 3'],
+  ];
+
+  for (const [column, sql] of migrations) {
+    if (!existing.has(column)) {
+      db.exec(sql);
+    }
+  }
+}
+
+function migrateSchedulesStatusCheck(): void {
+  const row = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='schedules'"
+  ).get() as { sql: string } | undefined;
+
+  if (!row || row.sql.includes('pending_review')) {
+    return;
+  }
+
+  db.pragma('foreign_keys = OFF');
+  const migrate = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE schedules_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_id INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        schedule_time DATETIME NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'scheduled', 'publishing', 'published', 'failed', 'withdrawn', 'pending_review')),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (content_id) REFERENCES contents(id),
+        FOREIGN KEY (channel_id) REFERENCES channels(id)
+      );
+      INSERT INTO schedules_new (id, content_id, channel_id, schedule_time, status, created_at, updated_at)
+        SELECT id, content_id, channel_id, schedule_time, status, created_at, updated_at FROM schedules;
+      DROP TABLE schedules;
+      ALTER TABLE schedules_new RENAME TO schedules;
+    `);
+  });
+  migrate();
+  db.pragma('foreign_keys = ON');
 }
 
 export default initDatabase;

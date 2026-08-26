@@ -5,6 +5,7 @@ import { createError } from '../types/index.js'
 import ScheduleModel from '../models/Schedule.js'
 import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
+import AuditRecordModel from '../models/AuditRecord.js'
 import ScheduleService from '../services/ScheduleService.js'
 import { validateScheduleTime, validateDuplicateSchedule, validateSensitiveWordsHandled } from '../utils/validator.js'
 import { schedulePublishTask, cancelPublishTask } from '../scheduler/publishTask.js'
@@ -169,6 +170,14 @@ router.post(
 
     await schedulePublishTask(schedule.id, schedule.schedule_time)
 
+    await AuditRecordModel.create({
+      operator_id: req.user.id,
+      action: 'schedule.create',
+      target_type: 'schedule',
+      target_id: schedule.id,
+      detail: `创建排期：内容ID ${content_id}，渠道ID ${channel_id}，时间 ${schedule_time}`,
+    })
+
     const response: ApiResponse<{ schedule: Schedule; risk_warning?: ScheduleRiskWarning }> = {
       success: true,
       data: { schedule, risk_warning },
@@ -272,6 +281,46 @@ router.put(
 )
 
 router.post(
+  '/:id/reschedule',
+  requireRole('editor', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) {
+      throw createError('用户未登录', 401)
+    }
+
+    const id = parseInt(req.params.id, 10)
+
+    if (isNaN(id)) {
+      throw createError('无效的排期ID', 400)
+    }
+
+    const { schedule_time } = req.body as { schedule_time?: string }
+
+    if (!schedule_time) {
+      throw createError('排期时间不能为空', 400)
+    }
+
+    const existing = await ScheduleModel.findById(id, true)
+    if (existing && req.user.role === 'editor' && existing.content?.creator_id !== req.user.id) {
+      throw createError('无权重新排期此任务', 403)
+    }
+
+    await cancelPublishTask(id)
+
+    const updatedSchedule = await ScheduleService.rescheduleSchedule(id, schedule_time, req.user.id)
+
+    await schedulePublishTask(updatedSchedule.id, updatedSchedule.schedule_time)
+
+    const response: ApiResponse<Schedule> = {
+      success: true,
+      data: updatedSchedule,
+    }
+
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
   '/:id/withdraw',
   requireRole('editor', 'reviewer', 'admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
@@ -308,6 +357,14 @@ router.post(
     await cancelPublishTask(id)
 
     const updatedSchedule = await ScheduleService.withdrawSchedule(id, reason)
+
+    await AuditRecordModel.create({
+      operator_id: req.user.id,
+      action: 'schedule.withdraw',
+      target_type: 'schedule',
+      target_id: id,
+      detail: `撤回排期：${reason}`,
+    })
 
     if (schedule.content_id) {
       await ContentModel.updateStatus(schedule.content_id, 'review_approved')
@@ -355,6 +412,14 @@ router.delete(
     await cancelPublishTask(id)
 
     const updatedSchedule = await ScheduleService.withdrawSchedule(id, defaultReason)
+
+    await AuditRecordModel.create({
+      operator_id: req.user.id,
+      action: 'schedule.withdraw',
+      target_type: 'schedule',
+      target_id: id,
+      detail: `撤回排期：${defaultReason}`,
+    })
 
     if (schedule.content_id) {
       await ContentModel.updateStatus(schedule.content_id, 'review_approved')

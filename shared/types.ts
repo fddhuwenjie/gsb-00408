@@ -4,7 +4,7 @@ export type ContentType = 'article' | 'video' | 'poster';
 
 export type ContentStatus = 'draft' | 'pending_review' | 'review_approved' | 'review_rejected' | 'scheduled' | 'published' | 'withdrawn';
 
-export type ScheduleStatus = 'pending' | 'approved' | 'rejected' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'withdrawn';
+export type ScheduleStatus = 'pending' | 'approved' | 'rejected' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'withdrawn' | 'pending_review';
 
 export type ReviewDecision = 'approve' | 'reject';
 
@@ -40,8 +40,34 @@ export interface ChannelHealth {
   last_failure_reason: string | null;
   rate_limit_status: RateLimitStatus;
   responsible_person: string | null;
+  enabled: boolean;
+  last_heartbeat: string | null;
+  consecutive_failures: number;
+  degrade_threshold: number;
   updated_at: string;
   channel?: Channel;
+}
+
+export type AuditAction =
+  | 'channel_health.update'
+  | 'channel.heartbeat'
+  | 'channel.degraded'
+  | 'channel.recovered'
+  | 'schedule.create'
+  | 'schedule.reschedule'
+  | 'schedule.withdraw'
+  | 'schedule.pending_review'
+  | 'failure_review.resolve';
+
+export interface AuditRecord {
+  id: number;
+  operator_id: number | null;
+  action: AuditAction;
+  target_type: 'channel' | 'schedule' | 'failure_review';
+  target_id: number;
+  detail: string | null;
+  created_at: string;
+  operator?: User;
 }
 
 export interface SensitiveWord {
@@ -125,6 +151,7 @@ export interface FailureReview {
   resolved_at: string | null;
   handler?: User;
   publish_record?: PublishRecord;
+  schedule?: Schedule;
 }
 
 export interface ScheduleRiskWarning {

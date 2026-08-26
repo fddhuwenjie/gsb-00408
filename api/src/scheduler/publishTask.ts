@@ -1,7 +1,7 @@
 import schedule from 'node-schedule'
-import db, { transaction } from '../db/index.js'
+import db from '../db/index.js'
 import ScheduleModel from '../models/Schedule.js'
-import PublishRecordModel from '../models/PublishRecord.js'
+import PublishServiceApi from '../services/PublishService.js'
 import type { Schedule } from '../../../shared/types.js'
 
 const scheduledTasks = new Map<number, schedule.Job>()
@@ -11,7 +11,7 @@ export const PublishService = {
     console.log(`[PublishService] 开始执行发布任务，排期ID: ${scheduleId}`)
 
     try {
-      const scheduleRecord = await ScheduleModel.findById(scheduleId, true)
+      const scheduleRecord = await ScheduleModel.findById(scheduleId)
 
       if (!scheduleRecord) {
         console.error(`[PublishService] 排期不存在，ID: ${scheduleId}`)
@@ -23,64 +23,16 @@ export const PublishService = {
         return
       }
 
-      const publishTime = new Date().toISOString()
-      const result = await simulatePublish(scheduleRecord)
-
-      transaction((tx) => {
-        tx.prepare(
-          'UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?',
-        ).run('published', publishTime, scheduleId)
-
-        tx.prepare(
-          'UPDATE contents SET status = ?, updated_at = ? WHERE id = ?',
-        ).run('published', publishTime, scheduleRecord.content_id)
-
-        tx.prepare(`
-          INSERT INTO publish_records (schedule_id, status, result, publish_time, created_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(
-          scheduleId,
-          result.success ? 'success' : 'failed',
-          result.message,
-          publishTime,
-          publishTime,
-        )
-      })
+      // 定时发布与手工发布共用同一套健康检查、降级、失败复核与审计逻辑
+      await PublishServiceApi.executePublish(scheduleId)
 
       console.log(`[PublishService] 发布任务完成，排期ID: ${scheduleId}`)
     } catch (error) {
       console.error(`[PublishService] 发布任务失败，排期ID: ${scheduleId}`, error)
-
-      const publishTime = new Date().toISOString()
-
-      await PublishRecordModel.create({
-        schedule_id: scheduleId,
-        status: 'failed',
-        result: error instanceof Error ? error.message : '未知错误',
-        publish_time: publishTime,
-      })
-
-      await ScheduleModel.updateStatus(scheduleId, 'published')
     } finally {
       scheduledTasks.delete(scheduleId)
     }
   },
-}
-
-async function simulatePublish(
-  scheduleRecord: Schedule,
-): Promise<{ success: boolean; message: string }> {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const success = Math.random() > 0.1
-      resolve({
-        success,
-        message: success
-          ? `内容 "${scheduleRecord.content?.title}" 已成功发布到 ${scheduleRecord.channel?.name}`
-          : `发布失败：网络连接超时`,
-      })
-    }, 1000)
-  })
 }
 
 export function initPublishScheduler(): void {

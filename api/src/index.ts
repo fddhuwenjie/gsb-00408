@@ -19,6 +19,7 @@ import exportRoutes from './routes/export.js'
 import publishRoutes from './routes/publish.js'
 import failureReviewRouter from './routes/failureReview.js'
 import dashboardRouter from './routes/dashboard.js'
+import auditRouter from './routes/audit.js'
 import type { ApiResponse } from '../../shared/types.js'
 
 dotenv.config()
@@ -53,6 +54,7 @@ app.use('/api/export', exportRoutes)
 app.use('/api/publish', publishRoutes)
 app.use('/api/failure-reviews', failureReviewRouter)
 app.use('/api/dashboard', dashboardRouter)
+app.use('/api/audit', auditRouter)
 
 app.use(errorHandler)
 app.use(notFoundHandler)

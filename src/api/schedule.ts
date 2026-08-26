@@ -33,6 +33,10 @@ export const withdrawSchedule = (id: number, reason: string): Promise<Schedule> 
   return post<Schedule>(`/schedule/${id}/withdraw`, { reason });
 };
 
+export const rescheduleSchedule = (id: number, scheduleTime: string): Promise<Schedule> => {
+  return post<Schedule>(`/schedule/${id}/reschedule`, { schedule_time: scheduleTime });
+};
+
 export const assessScheduleRisk = (channelId: number): Promise<ScheduleRiskWarning> => {
   return get<ScheduleRiskWarning>(`/schedule/risk/${channelId}`);
 };
