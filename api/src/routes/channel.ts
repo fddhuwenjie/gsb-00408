@@ -209,23 +209,44 @@ router.put(
   '/:id/health',
   requireRole('admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) throw createError('无效的渠道ID', 400)
-    const { success_rate, last_failure_reason, rate_limit_status, responsible_person } = req.body as {
+    const { success_rate, last_failure_reason, rate_limit_status, responsible_person, enabled, degrade_threshold } = req.body as {
       success_rate?: number
       last_failure_reason?: string
       rate_limit_status?: string
       responsible_person?: string
+      enabled?: boolean
+      degrade_threshold?: number
     }
     const updated = await ChannelService.updateChannelHealth(id, {
       success_rate,
       last_failure_reason,
       rate_limit_status: rate_limit_status as 'normal' | 'limited' | 'blocked' | undefined,
       responsible_person,
-    })
+      enabled,
+      degrade_threshold,
+    }, req.user.id)
     const response: ApiResponse<typeof updated> = {
       success: true,
       data: updated,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/heartbeat',
+  requireRole('reviewer', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const health = await ChannelService.recordHeartbeat(id, req.user.id)
+    const response: ApiResponse<typeof health> = {
+      success: true,
+      data: health,
     }
     res.status(200).json(response)
   }),

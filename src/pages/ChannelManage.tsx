@@ -9,6 +9,7 @@ import {
   getChannelHealthList,
   updateChannelHealth,
   refreshChannelHealth as refreshChannelHealthApi,
+  sendChannelHeartbeat,
 } from '../api/channel';
 import type { Channel, ChannelHealth } from '../../shared/types';
 
@@ -35,6 +36,8 @@ export default function ChannelManage() {
   const [healthChannelId, setHealthChannelId] = useState<number | null>(null);
   const [editingResponsible, setEditingResponsible] = useState(false);
   const [responsibleInput, setResponsibleInput] = useState('');
+  const [editingThreshold, setEditingThreshold] = useState(false);
+  const [thresholdInput, setThresholdInput] = useState('');
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [name, setName] = useState('');
@@ -157,6 +160,44 @@ export default function ChannelManage() {
     }
   };
 
+  const handleHeartbeat = async () => {
+    if (!healthChannelId) return;
+    try {
+      const updated = await sendChannelHeartbeat(healthChannelId);
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
+  const handleSaveThreshold = async () => {
+    if (!healthChannelId) return;
+    const value = parseInt(thresholdInput, 10);
+    if (isNaN(value) || value < 1) {
+      alert('降级阈值必须为大于等于1的整数');
+      return;
+    }
+    try {
+      const updated = await updateChannelHealth(healthChannelId, { degrade_threshold: value });
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+      setEditingThreshold(false);
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
+  const handleToggleEnabled = async () => {
+    if (!healthChannelId) return;
+    const health = channelHealthData[healthChannelId];
+    if (!health) return;
+    try {
+      const updated = await updateChannelHealth(healthChannelId, { enabled: !health.enabled });
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -239,8 +280,18 @@ export default function ChannelManage() {
                         </div>
                         <span className={cn('text-sm font-bold', healthColor)}>{(health.success_rate * 100).toFixed(0)}%</span>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {rateLimitBadge}
+                        {!health.enabled && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700">
+                            <AlertTriangle className="w-3 h-3" />已降级暂停
+                          </span>
+                        )}
+                        {health.consecutive_failures > 0 && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-orange-100 text-orange-700">
+                            连续失败 {health.consecutive_failures}/{health.degrade_threshold}
+                          </span>
+                        )}
                         {health.responsible_person && (
                           <span className="flex items-center gap-1 text-xs text-gray-500">
                             <User className="w-3 h-3" />
@@ -514,6 +565,62 @@ export default function ChannelManage() {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-2">降级状态</p>
+                    <button
+                      onClick={handleToggleEnabled}
+                      className={cn(
+                        'inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                        health.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'
+                      )}
+                      title="点击切换启用/暂停"
+                    >
+                      {health.enabled ? <CheckCircle className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                      {health.enabled ? '已启用' : '已暂停'}
+                    </button>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-2">降级阈值</p>
+                    {editingThreshold ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={1}
+                          value={thresholdInput}
+                          onChange={(e) => setThresholdInput(e.target.value)}
+                          className="w-20 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-1 focus:ring-[#1e3a5f] focus:border-[#1e3a5f] outline-none"
+                          autoFocus
+                        />
+                        <button
+                          onClick={handleSaveThreshold}
+                          className="text-xs text-[#1e3a5f] font-medium hover:underline"
+                        >
+                          保存
+                        </button>
+                      </div>
+                    ) : (
+                      <span
+                        className="text-sm text-gray-700 cursor-pointer hover:text-[#1e3a5f]"
+                        onClick={() => { setEditingThreshold(true); setThresholdInput(String(health.degrade_threshold)); }}
+                        title="点击编辑阈值"
+                      >
+                        连续失败 {health.degrade_threshold} 次降级
+                      </span>
+                    )}
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-2">连续失败</p>
+                    <span className={cn('text-sm font-medium', health.consecutive_failures > 0 ? 'text-red-600' : 'text-gray-700')}>
+                      {health.consecutive_failures} 次
+                    </span>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-2">最近心跳</p>
+                    <span className="text-sm text-gray-700">{health.last_heartbeat || '暂无'}</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 rounded-lg">
                     <p className="text-sm text-gray-500 mb-2">限流状态</p>
                     {rateLimitBadge}
                   </div>
@@ -565,6 +672,13 @@ export default function ChannelManage() {
 
               <div className="flex gap-4 mt-8">
                 <button
+                  onClick={handleHeartbeat}
+                  className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-green-600 text-green-700 hover:bg-green-50 transition-colors inline-flex items-center justify-center gap-2"
+                >
+                  <Activity className="w-4 h-4" />
+                  发送心跳
+                </button>
+                <button
                   onClick={handleRefreshHealth}
                   className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-2"
                 >
@@ -572,7 +686,7 @@ export default function ChannelManage() {
                   刷新健康度
                 </button>
                 <button
-                  onClick={() => { setShowHealthModal(false); setEditingResponsible(false); }}
+                  onClick={() => { setShowHealthModal(false); setEditingResponsible(false); setEditingThreshold(false); }}
                   className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-[#1e3a5f] text-white hover:bg-[#2d4a6f] transition-colors"
                 >
                   关闭

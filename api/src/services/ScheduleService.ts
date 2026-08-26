@@ -3,6 +3,8 @@ import { createError } from '../types/index.js'
 import ScheduleModel from '../models/Schedule.js'
 import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
+import ChannelHealthModel from '../models/ChannelHealth.js'
+import AuditRecordModel from '../models/AuditRecord.js'
 import ChannelService from './ChannelService.js'
 import {
   validateScheduleTime,
@@ -37,6 +39,11 @@ export async function createScheduleWithRisk(
 
   if (channel.status !== 'active') {
     throw createError('渠道未激活', 400, 'CHANNEL_INACTIVE')
+  }
+
+  const channelHealthy = await ChannelHealthModel.isHealthy(data.channel_id)
+  if (!channelHealthy) {
+    throw createError('渠道已降级暂停，待心跳恢复后才能排期', 400, 'CHANNEL_DEGRADED')
   }
 
   const riskWarning = await ChannelService.assessChannelRisk(data.channel_id)
@@ -121,6 +128,69 @@ export async function updateSchedule(
   if (!updatedSchedule) {
     throw createError('更新排期失败', 500, 'UPDATE_FAILED')
   }
+
+  return updatedSchedule
+}
+
+export async function rescheduleSchedule(
+  scheduleId: number,
+  scheduleTime: string,
+  operatorId?: number,
+): Promise<Schedule> {
+  const schedule = await ScheduleModel.findById(scheduleId, true)
+
+  if (!schedule) {
+    throw createError('排期不存在', 404, 'SCHEDULE_NOT_FOUND')
+  }
+
+  if (schedule.status !== 'pending_review') {
+    throw createError('只有待复核状态的排期才能重新排期', 400, 'SCHEDULE_NOT_PENDING_REVIEW')
+  }
+
+  const channel = await ChannelModel.findById(schedule.channel_id)
+  if (!channel) {
+    throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
+  }
+
+  if (channel.status !== 'active') {
+    throw createError('渠道未激活', 400, 'CHANNEL_INACTIVE')
+  }
+
+  const channelHealthy = await ChannelHealthModel.isHealthy(schedule.channel_id)
+  if (!channelHealthy) {
+    throw createError('渠道心跳尚未恢复，无法重新排期', 400, 'CHANNEL_DEGRADED')
+  }
+
+  const scheduleTimeValid = await validateScheduleTime(scheduleTime)
+  if (!scheduleTimeValid.valid) {
+    throw createError(scheduleTimeValid.error!, 400, 'INVALID_SCHEDULE_TIME')
+  }
+
+  const duplicateValid = await validateDuplicateSchedule(
+    schedule.channel_id,
+    scheduleTime,
+    scheduleId,
+  )
+  if (!duplicateValid.valid) {
+    throw createError(duplicateValid.error!, 400, 'DUPLICATE_SCHEDULE')
+  }
+
+  const updatedSchedule = await ScheduleModel.update(scheduleId, {
+    schedule_time: scheduleTime,
+    status: 'scheduled',
+  })
+
+  if (!updatedSchedule) {
+    throw createError('重新排期失败', 500, 'UPDATE_FAILED')
+  }
+
+  await AuditRecordModel.create({
+    operator_id: operatorId ?? null,
+    action: 'schedule.reschedule',
+    target_type: 'schedule',
+    target_id: scheduleId,
+    detail: `渠道「${channel.name}」心跳已恢复，人工重新排期至 ${scheduleTime}`,
+  })
 
   return updatedSchedule
 }
@@ -238,6 +308,7 @@ export default {
   createScheduleWithRisk,
   assessScheduleRisk,
   updateSchedule,
+  rescheduleSchedule,
   withdrawSchedule,
   getScheduleList,
   getScheduleCalendar,

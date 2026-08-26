@@ -43,8 +43,14 @@ export const updateChannelHealth = (channelId: number, data: {
   last_failure_reason?: string;
   rate_limit_status?: string;
   responsible_person?: string;
+  enabled?: boolean;
+  degrade_threshold?: number;
 }): Promise<ChannelHealth> => {
   return put<ChannelHealth>(`/channel/${channelId}/health`, data);
+};
+
+export const sendChannelHeartbeat = (channelId: number): Promise<ChannelHealth> => {
+  return post<ChannelHealth>(`/channel/${channelId}/heartbeat`);
 };
 
 export const refreshChannelHealth = (channelId: number): Promise<ChannelHealth> => {

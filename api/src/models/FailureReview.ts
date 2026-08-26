@@ -106,6 +106,57 @@ export async function findById(id: number, includeRelations = false): Promise<Fa
   return result as unknown as FailureReview
 }
 
+const RELATION_SELECT = `
+  fr.id, fr.publish_record_id, fr.schedule_id, fr.handler_id, fr.conclusion, fr.action_type, fr.status, fr.created_at, fr.resolved_at,
+  s.id as 'schedule.id', s.content_id as 'schedule.content_id', s.channel_id as 'schedule.channel_id',
+  s.schedule_time as 'schedule.schedule_time', s.status as 'schedule.status',
+  s.created_at as 'schedule.created_at', s.updated_at as 'schedule.updated_at',
+  c.id as 'channel.id', c.name as 'channel.name', c.type as 'channel.type', c.status as 'channel.status', c.config as 'channel.config'
+`
+
+const RELATION_JOIN = `
+  FROM failure_reviews fr
+  LEFT JOIN schedules s ON fr.schedule_id = s.id
+  LEFT JOIN channels c ON s.channel_id = c.id
+`
+
+function mapRowWithRelations(row: Record<string, unknown>): FailureReview {
+  const record: FailureReview = {
+    id: row.id as number,
+    publish_record_id: row.publish_record_id as number,
+    schedule_id: row.schedule_id as number,
+    handler_id: row.handler_id as number | null,
+    conclusion: row.conclusion as string | null,
+    action_type: row.action_type as FailureReviewAction | null,
+    status: row.status as FailureReviewStatus,
+    created_at: row.created_at as string,
+    resolved_at: row.resolved_at as string | null,
+  }
+
+  if (row['schedule.id']) {
+    record.schedule = {
+      id: row['schedule.id'] as number,
+      content_id: row['schedule.content_id'] as number,
+      channel_id: row['schedule.channel_id'] as number,
+      schedule_time: row['schedule.schedule_time'] as string,
+      status: row['schedule.status'] as import('../../../shared/types.js').ScheduleStatus,
+      created_at: row['schedule.created_at'] as string,
+      updated_at: row['schedule.updated_at'] as string,
+    }
+    if (row['channel.id']) {
+      record.schedule.channel = {
+        id: row['channel.id'] as number,
+        name: row['channel.name'] as string,
+        type: row['channel.type'] as string,
+        status: row['channel.status'] as 'active' | 'inactive',
+        config: (row['channel.config'] as string | null) ?? null,
+      }
+    }
+  }
+
+  return record
+}
+
 export async function findAll(params?: PaginationParams): Promise<PaginationResult<FailureReview>> {
   const page = params?.page || 1
   const pageSize = params?.pageSize || 10
@@ -115,12 +166,13 @@ export async function findAll(params?: PaginationParams): Promise<PaginationResu
   const { total } = countStmt.get() as { total: number }
 
   const stmt = db.prepare(`
-    SELECT id, publish_record_id, schedule_id, handler_id, conclusion, action_type, status, created_at, resolved_at
-    FROM failure_reviews
-    ORDER BY created_at DESC
+    SELECT ${RELATION_SELECT}
+    ${RELATION_JOIN}
+    ORDER BY fr.created_at DESC
     LIMIT ? OFFSET ?
   `)
-  const items = stmt.all(pageSize, offset) as FailureReview[]
+  const rows = stmt.all(pageSize, offset) as Record<string, unknown>[]
+  const items = rows.map(mapRowWithRelations)
 
   return { items, total, page, pageSize }
 }
@@ -137,13 +189,14 @@ export async function findByStatus(
   const { total } = countStmt.get(status) as { total: number }
 
   const stmt = db.prepare(`
-    SELECT id, publish_record_id, schedule_id, handler_id, conclusion, action_type, status, created_at, resolved_at
-    FROM failure_reviews
-    WHERE status = ?
-    ORDER BY created_at DESC
+    SELECT ${RELATION_SELECT}
+    ${RELATION_JOIN}
+    WHERE fr.status = ?
+    ORDER BY fr.created_at DESC
     LIMIT ? OFFSET ?
   `)
-  const items = stmt.all(status, pageSize, offset) as FailureReview[]
+  const rows = stmt.all(status, pageSize, offset) as Record<string, unknown>[]
+  const items = rows.map(mapRowWithRelations)
 
   return { items, total, page, pageSize }
 }

@@ -2,6 +2,7 @@ import db from '../db/index.js'
 import { createError } from '../types/index.js'
 import ChannelModel from '../models/Channel.js'
 import ChannelHealthModel from '../models/ChannelHealth.js'
+import AuditRecordModel from '../models/AuditRecord.js'
 import ScheduleModel from '../models/Schedule.js'
 import type {
   Channel,
@@ -232,18 +233,73 @@ export async function updateChannelHealth(
     last_failure_reason?: string | null
     rate_limit_status?: RateLimitStatus
     responsible_person?: string | null
+    enabled?: boolean
+    degrade_threshold?: number
   },
+  operatorId?: number,
 ): Promise<ChannelHealth> {
   const channel = await ChannelModel.findById(channelId)
   if (!channel) {
     throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
   }
 
+  if (data.degrade_threshold !== undefined && (!Number.isInteger(data.degrade_threshold) || data.degrade_threshold < 1)) {
+    throw createError('降级阈值必须为大于等于1的整数', 400, 'INVALID_THRESHOLD')
+  }
+
   const updated = await ChannelHealthModel.updateByChannelId(channelId, data)
   if (!updated) {
     throw createError('更新渠道健康信息失败', 500, 'UPDATE_FAILED')
   }
+
+  await AuditRecordModel.create({
+    operator_id: operatorId ?? null,
+    action: 'channel_health.update',
+    target_type: 'channel',
+    target_id: channelId,
+    detail: JSON.stringify(data),
+  })
+
   return updated
+}
+
+export async function recordHeartbeat(
+  channelId: number,
+  operatorId?: number,
+): Promise<ChannelHealth> {
+  const channel = await ChannelModel.findById(channelId)
+  if (!channel) {
+    throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
+  }
+
+  await getChannelHealth(channelId)
+  const before = await ChannelHealthModel.findByChannelId(channelId)
+  const wasDisabled = before ? !before.enabled : false
+
+  const health = await ChannelHealthModel.recordHeartbeat(channelId)
+  if (!health) {
+    throw createError('记录心跳失败', 500, 'HEARTBEAT_FAILED')
+  }
+
+  await AuditRecordModel.create({
+    operator_id: operatorId ?? null,
+    action: 'channel.heartbeat',
+    target_type: 'channel',
+    target_id: channelId,
+    detail: `渠道「${channel.name}」心跳恢复，连续失败计数已清零`,
+  })
+
+  if (wasDisabled) {
+    await AuditRecordModel.create({
+      operator_id: operatorId ?? null,
+      action: 'channel.recovered',
+      target_type: 'channel',
+      target_id: channelId,
+      detail: `渠道「${channel.name}」心跳恢复，已解除降级暂停，可人工重新排期`,
+    })
+  }
+
+  return health
 }
 
 export async function refreshChannelHealth(
@@ -316,6 +372,7 @@ export default {
   getChannelHealth,
   updateChannelHealth,
   refreshChannelHealth,
+  recordHeartbeat,
   assessChannelRisk,
   getHighRiskChannels,
 }
