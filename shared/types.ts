@@ -4,7 +4,7 @@ export type ContentType = 'article' | 'video' | 'poster';
 
 export type ContentStatus = 'draft' | 'pending_review' | 'review_approved' | 'review_rejected' | 'scheduled' | 'published' | 'withdrawn';
 
-export type ScheduleStatus = 'pending' | 'approved' | 'rejected' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'withdrawn';
+export type ScheduleStatus = 'pending' | 'approved' | 'rejected' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'withdrawn' | 'pending_review';
 
 export type ReviewDecision = 'approve' | 'reject';
 
@@ -40,8 +40,27 @@ export interface ChannelHealth {
   last_failure_reason: string | null;
   rate_limit_status: RateLimitStatus;
   responsible_person: string | null;
+  is_health_check_enabled: boolean;
+  last_heartbeat_at: string | null;
+  consecutive_failures: number;
+  failure_threshold: number;
+  is_degraded: boolean;
+  degraded_at: string | null;
   updated_at: string;
   channel?: Channel;
+}
+
+export type AuditTargetType = 'channel' | 'channel_health' | 'schedule' | 'failure_review';
+
+export interface AuditLog {
+  id: number;
+  operator_id: number | null;
+  action: string;
+  target_type: AuditTargetType | string;
+  target_id: number | null;
+  detail: string | null;
+  created_at: string;
+  operator?: User;
 }
 
 export interface SensitiveWord {

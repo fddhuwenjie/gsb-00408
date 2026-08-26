@@ -3,6 +3,7 @@ import { asyncHandler } from '../middleware/error.js'
 import { authMiddleware, requireRole } from '../middleware/auth.js'
 import { createError } from '../types/index.js'
 import PublishService from '../services/PublishService.js'
+import AuditService from '../services/AuditService.js'
 import type {
   FailureReview,
   PaginationParams,
@@ -44,6 +45,13 @@ router.post(
     if (!conclusion || conclusion.trim().length === 0) throw createError('处理结论不能为空', 400)
     if (!action_type || !['republish', 'manual_publish'].includes(action_type)) throw createError('处理方式无效', 400)
     const result = await PublishService.resolveFailureReview(id, req.user.id, conclusion, action_type)
+    await AuditService.record({
+      operatorId: req.user.id,
+      action: 'failure_review_resolve',
+      targetType: 'failure_review',
+      targetId: id,
+      detail: { conclusion, action_type },
+    })
     const response: ApiResponse<typeof result> = {
       success: true,
       data: result,

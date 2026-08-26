@@ -7,7 +7,9 @@ import {
   AlertTriangle,
   List,
   History,
+  CalendarClock,
   Settings,
+  ScrollText,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { UserRole } from '../../shared/types';
@@ -64,10 +66,22 @@ const menuItems: MenuItem[] = [
     roles: ['editor', 'reviewer', 'admin'],
   },
   {
+    path: '/pending-review',
+    label: '待复核排期',
+    icon: CalendarClock,
+    roles: ['editor', 'reviewer', 'admin'],
+  },
+  {
     path: '/channels',
     label: '渠道管理',
     icon: Settings,
     roles: ['admin'],
+  },
+  {
+    path: '/audit-logs',
+    label: '审计日志',
+    icon: ScrollText,
+    roles: ['reviewer', 'admin'],
   },
 ];
 

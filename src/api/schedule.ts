@@ -36,3 +36,10 @@ export const withdrawSchedule = (id: number, reason: string): Promise<Schedule> 
 export const assessScheduleRisk = (channelId: number): Promise<ScheduleRiskWarning> => {
   return get<ScheduleRiskWarning>(`/schedule/risk/${channelId}`);
 };
+
+export const rescheduleForReview = (
+  id: number,
+  data: { channel_id?: number; schedule_time: string },
+): Promise<Schedule> => {
+  return post<Schedule>(`/schedule/${id}/reschedule`, data);
+};

@@ -5,6 +5,8 @@ import { createError } from '../types/index.js'
 import ChannelModel from '../models/Channel.js'
 import ScheduleModel from '../models/Schedule.js'
 import ChannelService from '../services/ChannelService.js'
+import HealthCheckService from '../services/HealthCheckService.js'
+import AuditService from '../services/AuditService.js'
 import type {
   Channel,
   PaginationParams,
@@ -209,6 +211,7 @@ router.put(
   '/:id/health',
   requireRole('admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) throw createError('无效的渠道ID', 400)
     const { success_rate, last_failure_reason, rate_limit_status, responsible_person } = req.body as {
@@ -223,10 +226,85 @@ router.put(
       rate_limit_status: rate_limit_status as 'normal' | 'limited' | 'blocked' | undefined,
       responsible_person,
     })
+    await AuditService.record({
+      operatorId: req.user.id,
+      action: 'channel_health_update',
+      targetType: 'channel_health',
+      targetId: id,
+      detail: { success_rate, last_failure_reason, rate_limit_status, responsible_person },
+    })
     const response: ApiResponse<typeof updated> = {
       success: true,
       data: updated,
     }
+    res.status(200).json(response)
+  }),
+)
+
+// 健康检查配置：开关与降级阈值
+router.put(
+  '/:id/health/config',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const { is_health_check_enabled, failure_threshold } = req.body as {
+      is_health_check_enabled?: boolean
+      failure_threshold?: number
+    }
+    const updated = await HealthCheckService.updateHealthConfig(id, req.user.id, {
+      is_health_check_enabled,
+      failure_threshold,
+    })
+    const response: ApiResponse<typeof updated> = { success: true, data: updated }
+    res.status(200).json(response)
+  }),
+)
+
+// 心跳上报：刷新心跳并清零连续失败计数
+router.post(
+  '/:id/heartbeat',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const updated = await HealthCheckService.heartbeat(id, req.user.id)
+    const response: ApiResponse<typeof updated> = { success: true, data: updated }
+    res.status(200).json(response)
+  }),
+)
+
+// 手动降级并暂停渠道
+router.post(
+  '/:id/degrade',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const { reason } = req.body as { reason?: string }
+    const updated = await HealthCheckService.degradeChannel(
+      id,
+      req.user.id,
+      reason && reason.trim().length > 0 ? reason.trim() : '管理员手动降级',
+    )
+    const response: ApiResponse<typeof updated> = { success: true, data: updated }
+    res.status(200).json(response)
+  }),
+)
+
+// 心跳恢复后人工解除降级
+router.post(
+  '/:id/recover',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const updated = await HealthCheckService.recoverChannel(id, req.user.id)
+    const response: ApiResponse<typeof updated> = { success: true, data: updated }
     res.status(200).json(response)
   }),
 )
