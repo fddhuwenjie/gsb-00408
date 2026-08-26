@@ -2,6 +2,10 @@ import schedule from 'node-schedule'
 import db, { transaction } from '../db/index.js'
 import ScheduleModel from '../models/Schedule.js'
 import PublishRecordModel from '../models/PublishRecord.js'
+import ChannelHealthModel from '../models/ChannelHealth.js'
+import HealthCheckService from '../services/HealthCheckService.js'
+import FailureReviewModel from '../models/FailureReview.js'
+import AuditService from '../services/AuditService.js'
 import type { Schedule } from '../../../shared/types.js'
 
 const scheduledTasks = new Map<number, schedule.Job>()
@@ -23,17 +27,34 @@ export const PublishService = {
         return
       }
 
+      // 发布前健康检查：渠道已降级/停用时不发布，转入待复核
+      const check = await HealthCheckService.checkChannelPublishable(scheduleRecord.channel_id)
+      if (!check.publishable) {
+        console.log(`[PublishService] 渠道不可用（${check.reason}），排期转入待复核，ID: ${scheduleId}`)
+        await ScheduleModel.updateStatus(scheduleId, 'pending_review')
+        await AuditService.record({
+          operatorId: null,
+          action: 'schedule_pending_review',
+          targetType: 'schedule',
+          targetId: scheduleId,
+          detail: { reason: check.reason ?? '渠道健康检查未通过', channel_id: scheduleRecord.channel_id },
+        })
+        return
+      }
+
       const publishTime = new Date().toISOString()
       const result = await simulatePublish(scheduleRecord)
 
       transaction((tx) => {
-        tx.prepare(
-          'UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?',
-        ).run('published', publishTime, scheduleId)
+        if (result.success) {
+          tx.prepare(
+            'UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?',
+          ).run('published', publishTime, scheduleId)
 
-        tx.prepare(
-          'UPDATE contents SET status = ?, updated_at = ? WHERE id = ?',
-        ).run('published', publishTime, scheduleRecord.content_id)
+          tx.prepare(
+            'UPDATE contents SET status = ?, updated_at = ? WHERE id = ?',
+          ).run('published', publishTime, scheduleRecord.content_id)
+        }
 
         tx.prepare(`
           INSERT INTO publish_records (schedule_id, status, result, publish_time, created_at)
@@ -47,24 +68,67 @@ export const PublishService = {
         )
       })
 
+      if (result.success) {
+        await HealthCheckService.registerSuccess(scheduleRecord.channel_id)
+        await ChannelHealthModel.recalculate(scheduleRecord.channel_id)
+      } else {
+        await handlePublishFailure(scheduleId, scheduleRecord.channel_id, result.message)
+      }
+
       console.log(`[PublishService] 发布任务完成，排期ID: ${scheduleId}`)
     } catch (error) {
       console.error(`[PublishService] 发布任务失败，排期ID: ${scheduleId}`, error)
 
       const publishTime = new Date().toISOString()
+      const message = error instanceof Error ? error.message : '未知错误'
 
-      await PublishRecordModel.create({
+      const publishRecord = await PublishRecordModel.create({
         schedule_id: scheduleId,
         status: 'failed',
-        result: error instanceof Error ? error.message : '未知错误',
+        result: message,
         publish_time: publishTime,
       })
 
-      await ScheduleModel.updateStatus(scheduleId, 'published')
+      const scheduleRecord = await ScheduleModel.findById(scheduleId)
+      if (scheduleRecord) {
+        await handlePublishFailure(scheduleId, scheduleRecord.channel_id, message, publishRecord.id)
+      }
     } finally {
       scheduledTasks.delete(scheduleId)
     }
   },
+}
+
+/**
+ * 处理一次发布失败：累计连续失败并按阈值自动降级。
+ * 达到阈值触发降级时，渠道被暂停且排期转入待复核；否则排期标记 failed 并生成失败复盘。
+ */
+async function handlePublishFailure(
+  scheduleId: number,
+  channelId: number,
+  reason: string,
+  existingPublishRecordId?: number,
+): Promise<void> {
+  await ChannelHealthModel.recalculate(channelId)
+
+  const { degraded } = await HealthCheckService.registerFailure(channelId, scheduleId, reason)
+
+  if (!degraded) {
+    // 未触发降级：保持既有失败复盘流程
+    await ScheduleModel.updateStatus(scheduleId, 'failed')
+    const publishRecordId =
+      existingPublishRecordId ?? (await PublishRecordModel.getLatestByScheduleId(scheduleId))?.id
+    if (publishRecordId) {
+      const pending = await FailureReviewModel.findPendingByScheduleId(scheduleId)
+      if (!pending) {
+        await FailureReviewModel.create({
+          publish_record_id: publishRecordId,
+          schedule_id: scheduleId,
+        })
+      }
+    }
+  }
+  // 若已降级，degradeChannel 已将排期转入 pending_review 并记录审计
 }
 
 async function simulatePublish(

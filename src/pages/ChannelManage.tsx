@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Edit2, Trash2, Eye, X, CheckCircle, XCircle, Calendar, Activity, AlertTriangle, Shield, User, RefreshCw } from 'lucide-react';
+import { Plus, Edit2, Trash2, Eye, X, CheckCircle, XCircle, Calendar, Activity, AlertTriangle, Shield, User, RefreshCw, Heart, ShieldOff, ShieldCheck } from 'lucide-react';
 import { cn } from '../lib/utils';
 import {
   getChannelStatus,
@@ -9,6 +9,10 @@ import {
   getChannelHealthList,
   updateChannelHealth,
   refreshChannelHealth as refreshChannelHealthApi,
+  updateChannelHealthConfig,
+  sendChannelHeartbeat,
+  degradeChannel as degradeChannelApi,
+  recoverChannel as recoverChannelApi,
 } from '../api/channel';
 import type { Channel, ChannelHealth } from '../../shared/types';
 
@@ -35,6 +39,8 @@ export default function ChannelManage() {
   const [healthChannelId, setHealthChannelId] = useState<number | null>(null);
   const [editingResponsible, setEditingResponsible] = useState(false);
   const [responsibleInput, setResponsibleInput] = useState('');
+  const [thresholdInput, setThresholdInput] = useState<number>(3);
+  const [healthActionLoading, setHealthActionLoading] = useState(false);
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [name, setName] = useState('');
@@ -157,6 +163,74 @@ export default function ChannelManage() {
     }
   };
 
+  const handleHeartbeat = async () => {
+    if (!healthChannelId) return;
+    setHealthActionLoading(true);
+    try {
+      const updated = await sendChannelHeartbeat(healthChannelId);
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthActionLoading(false);
+    }
+  };
+
+  const handleDegrade = async () => {
+    if (!healthChannelId) return;
+    if (!confirm('确定要降级并暂停该渠道吗？相关排期将转入待复核。')) return;
+    setHealthActionLoading(true);
+    try {
+      const updated = await degradeChannelApi(healthChannelId, '管理员手动降级');
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+      setChannels(channels.map(c => c.id === healthChannelId ? { ...c, status: 'inactive' } : c));
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthActionLoading(false);
+    }
+  };
+
+  const handleRecover = async () => {
+    if (!healthChannelId) return;
+    setHealthActionLoading(true);
+    try {
+      const updated = await recoverChannelApi(healthChannelId);
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+      setChannels(channels.map(c => c.id === healthChannelId ? { ...c, status: 'active' } : c));
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthActionLoading(false);
+    }
+  };
+
+  const handleSaveThreshold = async () => {
+    if (!healthChannelId) return;
+    setHealthActionLoading(true);
+    try {
+      const updated = await updateChannelHealthConfig(healthChannelId, { failure_threshold: thresholdInput });
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthActionLoading(false);
+    }
+  };
+
+  const handleToggleHealthCheck = async (enabled: boolean) => {
+    if (!healthChannelId) return;
+    setHealthActionLoading(true);
+    try {
+      const updated = await updateChannelHealthConfig(healthChannelId, { is_health_check_enabled: enabled });
+      setChannelHealthData({ ...channelHealthData, [healthChannelId]: updated });
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -231,7 +305,7 @@ export default function ChannelManage() {
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700"><XCircle className="w-3 h-3" />已阻断</span>
                   );
                   return (
-                    <div className="space-y-2 mb-4 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => { setHealthChannelId(channel.id); setShowHealthModal(true); }}>
+                    <div className="space-y-2 mb-4 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => { setHealthChannelId(channel.id); setThresholdInput(health.failure_threshold); setShowHealthModal(true); }}>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Activity className="w-4 h-4 text-gray-400" />
@@ -239,8 +313,17 @@ export default function ChannelManage() {
                         </div>
                         <span className={cn('text-sm font-bold', healthColor)}>{(health.success_rate * 100).toFixed(0)}%</span>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {rateLimitBadge}
+                        {health.is_degraded && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700"><ShieldOff className="w-3 h-3" />已降级</span>
+                        )}
+                        {!health.is_health_check_enabled && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-gray-200 text-gray-600">检查关闭</span>
+                        )}
+                        {health.consecutive_failures > 0 && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-orange-100 text-orange-700"><AlertTriangle className="w-3 h-3" />连败 {health.consecutive_failures}/{health.failure_threshold}</span>
+                        )}
                         {health.responsible_person && (
                           <span className="flex items-center gap-1 text-xs text-gray-500">
                             <User className="w-3 h-3" />
@@ -557,23 +640,107 @@ export default function ChannelManage() {
                   </div>
                 )}
 
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-1">连续失败</p>
+                    <p className="text-lg font-bold text-gray-900">{health.consecutive_failures} / {health.failure_threshold}</p>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-1">降级状态</p>
+                    {health.is_degraded ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-red-100 text-red-700"><ShieldOff className="w-3.5 h-3.5" />已降级</span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-green-100 text-green-700"><ShieldCheck className="w-3.5 h-3.5" />正常</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-4 bg-gray-50 rounded-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-700">健康检查</span>
+                    <button
+                      disabled={healthActionLoading}
+                      onClick={() => handleToggleHealthCheck(!health.is_health_check_enabled)}
+                      className={cn(
+                        'px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-50',
+                        health.is_health_check_enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                      )}
+                    >
+                      {health.is_health_check_enabled ? '已开启' : '已关闭'}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-gray-700">降级阈值</span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        value={thresholdInput}
+                        onChange={(e) => setThresholdInput(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                        className="w-16 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-1 focus:ring-[#1e3a5f] focus:border-[#1e3a5f] outline-none"
+                      />
+                      <button
+                        disabled={healthActionLoading}
+                        onClick={handleSaveThreshold}
+                        className="text-xs text-[#1e3a5f] font-medium hover:underline disabled:opacity-50"
+                      >
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-700">最近心跳</span>
+                    <span className="text-sm text-gray-600">{health.last_heartbeat_at || '无'}</span>
+                  </div>
+                </div>
+
                 <div className="p-4 bg-gray-50 rounded-lg">
                   <p className="text-sm text-gray-500">更新时间</p>
                   <p className="text-sm text-gray-700 mt-1">{health.updated_at}</p>
                 </div>
               </div>
 
-              <div className="flex gap-4 mt-8">
+              <div className="grid grid-cols-3 gap-2 mt-6">
+                <button
+                  disabled={healthActionLoading}
+                  onClick={handleHeartbeat}
+                  className="py-2 px-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                >
+                  <Heart className="w-4 h-4" />
+                  心跳
+                </button>
+                {health.is_degraded ? (
+                  <button
+                    disabled={healthActionLoading}
+                    onClick={handleRecover}
+                    className="py-2 px-2 rounded-lg text-sm font-medium border border-green-300 text-green-700 hover:bg-green-50 transition-colors inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                  >
+                    <ShieldCheck className="w-4 h-4" />
+                    恢复
+                  </button>
+                ) : (
+                  <button
+                    disabled={healthActionLoading}
+                    onClick={handleDegrade}
+                    className="py-2 px-2 rounded-lg text-sm font-medium border border-red-300 text-red-700 hover:bg-red-50 transition-colors inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                  >
+                    <ShieldOff className="w-4 h-4" />
+                    降级
+                  </button>
+                )}
                 <button
                   onClick={handleRefreshHealth}
-                  className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-2"
+                  className="py-2 px-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-1"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  刷新健康度
+                  刷新
                 </button>
+              </div>
+
+              <div className="mt-3">
                 <button
                   onClick={() => { setShowHealthModal(false); setEditingResponsible(false); }}
-                  className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-[#1e3a5f] text-white hover:bg-[#2d4a6f] transition-colors"
+                  className="w-full py-2.5 px-4 rounded-lg font-medium bg-[#1e3a5f] text-white hover:bg-[#2d4a6f] transition-colors"
                 >
                   关闭
                 </button>

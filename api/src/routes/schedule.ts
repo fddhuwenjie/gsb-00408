@@ -6,6 +6,7 @@ import ScheduleModel from '../models/Schedule.js'
 import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
 import ScheduleService from '../services/ScheduleService.js'
+import AuditService from '../services/AuditService.js'
 import { validateScheduleTime, validateDuplicateSchedule, validateSensitiveWordsHandled } from '../utils/validator.js'
 import { schedulePublishTask, cancelPublishTask } from '../scheduler/publishTask.js'
 import type {
@@ -168,6 +169,14 @@ router.post(
     await ContentModel.updateStatus(content_id, 'scheduled')
 
     await schedulePublishTask(schedule.id, schedule.schedule_time)
+
+    await AuditService.record({
+      operatorId: req.user.id,
+      action: 'schedule_create',
+      targetType: 'schedule',
+      targetId: schedule.id,
+      detail: { content_id, channel_id, schedule_time },
+    })
 
     const response: ApiResponse<{ schedule: Schedule; risk_warning?: ScheduleRiskWarning }> = {
       success: true,
@@ -363,6 +372,59 @@ router.delete(
     const response: ApiResponse<Schedule> = {
       success: true,
       data: updatedSchedule,
+    }
+
+    res.status(200).json(response)
+  }),
+)
+
+// 待复核排期的人工重新排期（渠道恢复心跳后）
+router.post(
+  '/:id/reschedule',
+  requireRole('editor', 'reviewer', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) {
+      throw createError('用户未登录', 401)
+    }
+
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) {
+      throw createError('无效的排期ID', 400)
+    }
+
+    const { channel_id, schedule_time } = req.body as {
+      channel_id?: number
+      schedule_time?: string
+    }
+
+    if (!schedule_time) {
+      throw createError('排期时间不能为空', 400)
+    }
+
+    const existing = await ScheduleModel.findById(id, true)
+    if (!existing) {
+      throw createError('排期不存在', 404)
+    }
+
+    if (req.user.role === 'editor' && existing.content?.creator_id !== req.user.id) {
+      throw createError('无权重新排期此任务', 403)
+    }
+
+    const updated = await ScheduleService.rescheduleForReview(id, { channel_id, schedule_time })
+
+    await schedulePublishTask(updated.id, updated.schedule_time)
+
+    await AuditService.record({
+      operatorId: req.user.id,
+      action: 'schedule_reschedule',
+      targetType: 'schedule',
+      targetId: id,
+      detail: { channel_id: channel_id ?? existing.channel_id, schedule_time },
+    })
+
+    const response: ApiResponse<Schedule> = {
+      success: true,
+      data: updated,
     }
 
     res.status(200).json(response)

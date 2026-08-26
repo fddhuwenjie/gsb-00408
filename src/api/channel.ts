@@ -51,6 +51,25 @@ export const refreshChannelHealth = (channelId: number): Promise<ChannelHealth> 
   return post<ChannelHealth>(`/channel/${channelId}/health/refresh`);
 };
 
+export const updateChannelHealthConfig = (channelId: number, data: {
+  is_health_check_enabled?: boolean;
+  failure_threshold?: number;
+}): Promise<ChannelHealth> => {
+  return put<ChannelHealth>(`/channel/${channelId}/health/config`, data);
+};
+
+export const sendChannelHeartbeat = (channelId: number): Promise<ChannelHealth> => {
+  return post<ChannelHealth>(`/channel/${channelId}/heartbeat`);
+};
+
+export const degradeChannel = (channelId: number, reason?: string): Promise<ChannelHealth> => {
+  return post<ChannelHealth>(`/channel/${channelId}/degrade`, { reason });
+};
+
+export const recoverChannel = (channelId: number): Promise<ChannelHealth> => {
+  return post<ChannelHealth>(`/channel/${channelId}/recover`);
+};
+
 export const getHighRiskChannels = (): Promise<ScheduleRiskWarning[]> => {
   return get<ScheduleRiskWarning[]>('/channel/risk/high');
 };

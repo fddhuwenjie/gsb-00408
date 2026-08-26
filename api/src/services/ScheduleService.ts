@@ -233,6 +233,60 @@ export async function getScheduleDetail(scheduleId: number): Promise<Schedule> {
   return schedule
 }
 
+/**
+ * 待复核排期的人工重新排期：仅允许 pending_review 状态，
+ * 且目标渠道健康检查通过后重新置为 scheduled。
+ */
+export async function rescheduleForReview(
+  scheduleId: number,
+  data: { channel_id?: number; schedule_time: string },
+): Promise<Schedule> {
+  const schedule = await ScheduleModel.findById(scheduleId)
+
+  if (!schedule) {
+    throw createError('排期不存在', 404, 'SCHEDULE_NOT_FOUND')
+  }
+
+  if (schedule.status !== 'pending_review') {
+    throw createError('只有待复核的排期才能重新排期', 400, 'NOT_PENDING_REVIEW')
+  }
+
+  const channelId = data.channel_id ?? schedule.channel_id
+
+  const check = await ChannelService.assessChannelRisk(channelId)
+  void check
+
+  const channel = await ChannelModel.findById(channelId)
+  if (!channel) {
+    throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
+  }
+  if (channel.status !== 'active') {
+    throw createError('渠道未启用，无法重新排期', 400, 'CHANNEL_INACTIVE')
+  }
+
+  const scheduleTimeValid = await validateScheduleTime(data.schedule_time)
+  if (!scheduleTimeValid.valid) {
+    throw createError(scheduleTimeValid.error!, 400, 'INVALID_SCHEDULE_TIME')
+  }
+
+  const duplicateValid = await validateDuplicateSchedule(channelId, data.schedule_time, scheduleId)
+  if (!duplicateValid.valid) {
+    throw createError(duplicateValid.error!, 400, 'DUPLICATE_SCHEDULE')
+  }
+
+  const updated = await ScheduleModel.update(scheduleId, {
+    channel_id: data.channel_id,
+    schedule_time: data.schedule_time,
+    status: 'scheduled',
+  })
+
+  if (!updated) {
+    throw createError('重新排期失败', 500, 'RESCHEDULE_FAILED')
+  }
+
+  return updated
+}
+
 export default {
   createSchedule,
   createScheduleWithRisk,
@@ -242,4 +296,5 @@ export default {
   getScheduleList,
   getScheduleCalendar,
   getScheduleDetail,
+  rescheduleForReview,
 }
