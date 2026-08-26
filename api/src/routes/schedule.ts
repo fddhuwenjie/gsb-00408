@@ -5,6 +5,7 @@ import { createError } from '../types/index.js'
 import ScheduleModel from '../models/Schedule.js'
 import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
+import AuditLogModel from '../models/AuditLog.js'
 import ScheduleService from '../services/ScheduleService.js'
 import { validateScheduleTime, validateDuplicateSchedule, validateSensitiveWordsHandled } from '../utils/validator.js'
 import { schedulePublishTask, cancelPublishTask } from '../scheduler/publishTask.js'
@@ -142,6 +143,10 @@ router.post(
       throw createError('渠道不存在', 404)
     }
 
+    if (channel.status === 'paused') {
+      throw createError('渠道因连续发布失败已降级暂停，请等待心跳恢复并由管理员重新启用后再排期', 400, 'CHANNEL_DEGRADED')
+    }
+
     if (channel.status !== 'active') {
       throw createError('渠道未启用', 400)
     }
@@ -166,6 +171,19 @@ router.post(
     )
 
     await ContentModel.updateStatus(content_id, 'scheduled')
+
+    await AuditLogModel.create({
+      operator_id: req.user.id,
+      action: 'schedule.create',
+      target_type: 'schedule',
+      target_id: schedule.id,
+      detail: {
+        content_id,
+        channel_id,
+        channel_name: channel.name,
+        schedule_time,
+      },
+    })
 
     await schedulePublishTask(schedule.id, schedule.schedule_time)
 
@@ -231,6 +249,9 @@ router.put(
       const channel = await ChannelModel.findById(channel_id)
       if (!channel) {
         throw createError('渠道不存在', 404)
+      }
+      if (channel.status === 'paused') {
+        throw createError('渠道因连续发布失败已降级暂停，请等待心跳恢复并由管理员重新启用后再排期', 400, 'CHANNEL_DEGRADED')
       }
       if (channel.status !== 'active') {
         throw createError('渠道未启用', 400)

@@ -11,6 +11,7 @@ const pageTitles: Record<string, string> = {
   '/sensitive-words': '敏感词管理',
   '/risk-words': '风险词明细',
   '/publish-records': '发布记录',
+  '/failure-reviews': '失败复核',
   '/channels': '渠道管理',
 };
 

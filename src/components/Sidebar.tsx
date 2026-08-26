@@ -8,6 +8,7 @@ import {
   List,
   History,
   Settings,
+  ClipboardCheck,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { UserRole } from '../../shared/types';
@@ -62,6 +63,12 @@ const menuItems: MenuItem[] = [
     label: '发布记录',
     icon: History,
     roles: ['editor', 'reviewer', 'admin'],
+  },
+  {
+    path: '/failure-reviews',
+    label: '失败复核',
+    icon: ClipboardCheck,
+    roles: ['reviewer', 'admin'],
   },
   {
     path: '/channels',
