@@ -8,7 +8,7 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import { errorHandler, notFoundHandler } from './middleware/error.js'
 import { initDatabase, seedData } from './models/index.js'
-import { initPublishScheduler } from './scheduler/publishTask.js'
+import { initPublishScheduler, initHeartbeatChecker, stopHeartbeatChecker } from './scheduler/publishTask.js'
 import authRoutes from './routes/auth.js'
 import contentRoutes from './routes/content.js'
 import scheduleRoutes from './routes/schedule.js'
@@ -19,6 +19,7 @@ import exportRoutes from './routes/export.js'
 import publishRoutes from './routes/publish.js'
 import failureReviewRouter from './routes/failureReview.js'
 import dashboardRouter from './routes/dashboard.js'
+import auditLogRouter from './routes/auditLog.js'
 import type { ApiResponse } from '../../shared/types.js'
 
 dotenv.config()
@@ -53,6 +54,7 @@ app.use('/api/export', exportRoutes)
 app.use('/api/publish', publishRoutes)
 app.use('/api/failure-reviews', failureReviewRouter)
 app.use('/api/dashboard', dashboardRouter)
+app.use('/api/audit-logs', auditLogRouter)
 
 app.use(errorHandler)
 app.use(notFoundHandler)
@@ -71,12 +73,17 @@ async function startServer(): Promise<void> {
     initPublishScheduler()
     console.log('[Server] 定时任务调度器初始化完成')
 
+    console.log('[Server] 正在初始化心跳巡检...')
+    initHeartbeatChecker()
+    console.log('[Server] 心跳巡检初始化完成')
+
     const server = app.listen(PORT, () => {
       console.log(`[Server] 服务已启动，监听端口 ${PORT}`)
     })
 
     process.on('SIGTERM', () => {
       console.log('[Server] 收到 SIGTERM 信号，正在关闭服务...')
+      stopHeartbeatChecker()
       server.close(() => {
         console.log('[Server] 服务已关闭')
         process.exit(0)
@@ -85,6 +92,7 @@ async function startServer(): Promise<void> {
 
     process.on('SIGINT', () => {
       console.log('[Server] 收到 SIGINT 信号，正在关闭服务...')
+      stopHeartbeatChecker()
       server.close(() => {
         console.log('[Server] 服务已关闭')
         process.exit(0)

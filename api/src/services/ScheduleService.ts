@@ -4,6 +4,8 @@ import ScheduleModel from '../models/Schedule.js'
 import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
 import ChannelService from './ChannelService.js'
+import HealthCheckService from './HealthCheckService.js'
+import AuditLogModel from '../models/AuditLog.js'
 import {
   validateScheduleTime,
   validateDuplicateSchedule,
@@ -37,6 +39,11 @@ export async function createScheduleWithRisk(
 
   if (channel.status !== 'active') {
     throw createError('渠道未激活', 400, 'CHANNEL_INACTIVE')
+  }
+
+  const healthCheck = await HealthCheckService.checkChannelHealthBeforePublish(data.channel_id)
+  if (!healthCheck.allowed) {
+    throw createError(healthCheck.reason || '渠道健康检查未通过', 503, 'CHANNEL_DEGRADED')
   }
 
   const riskWarning = await ChannelService.assessChannelRisk(data.channel_id)
@@ -233,6 +240,68 @@ export async function getScheduleDetail(scheduleId: number): Promise<Schedule> {
   return schedule
 }
 
+export async function reschedulePendingReview(
+  scheduleId: number,
+  newScheduleTime: string,
+  operatorId: number,
+  ipAddress?: string,
+): Promise<Schedule> {
+  const schedule = await ScheduleModel.findById(scheduleId, true)
+
+  if (!schedule) {
+    throw createError('排期不存在', 404, 'SCHEDULE_NOT_FOUND')
+  }
+
+  if (schedule.status !== 'pending_review') {
+    throw createError('只有待复核状态的排期才能重新排期', 400, 'NOT_PENDING_REVIEW')
+  }
+
+  const healthCheck = await HealthCheckService.checkChannelHealthBeforePublish(schedule.channel_id)
+  if (!healthCheck.allowed) {
+    throw createError(healthCheck.reason || '渠道健康检查未通过，无法重新排期', 503, 'CHANNEL_DEGRADED')
+  }
+
+  const timeCheck = await validateScheduleTime(newScheduleTime)
+  if (!timeCheck.valid) {
+    throw createError(timeCheck.error!, 400, 'INVALID_SCHEDULE_TIME')
+  }
+
+  const duplicateCheck = await validateDuplicateSchedule(
+    schedule.channel_id,
+    newScheduleTime,
+    scheduleId,
+  )
+  if (!duplicateCheck.valid) {
+    throw createError(duplicateCheck.error!, 400, 'DUPLICATE_SCHEDULE')
+  }
+
+  const updated = await ScheduleModel.update(scheduleId, {
+    schedule_time: newScheduleTime,
+    status: 'scheduled',
+  })
+
+  if (!updated) {
+    throw createError('重新排期失败', 500, 'UPDATE_FAILED')
+  }
+
+  await AuditLogModel.create({
+    operator_id: operatorId,
+    action: 'schedule_reschedule',
+    resource_type: 'schedule',
+    resource_id: scheduleId,
+    detail: `待复核排期重新排期至 ${newScheduleTime}`,
+    ip_address: ipAddress ?? null,
+  })
+
+  return updated
+}
+
+export async function getPendingReviewSchedules(
+  params?: PaginationParams,
+): Promise<PaginationResult<Schedule>> {
+  return ScheduleModel.findByStatus('pending_review', params)
+}
+
 export default {
   createSchedule,
   createScheduleWithRisk,
@@ -242,4 +311,6 @@ export default {
   getScheduleList,
   getScheduleCalendar,
   getScheduleDetail,
+  reschedulePendingReview,
+  getPendingReviewSchedules,
 }

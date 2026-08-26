@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Edit2, Trash2, Eye, X, CheckCircle, XCircle, Calendar, Activity, AlertTriangle, Shield, User, RefreshCw } from 'lucide-react';
+import { Plus, Edit2, Trash2, Eye, X, CheckCircle, XCircle, Calendar, Activity, AlertTriangle, Shield, User, RefreshCw, Heart, Pause, Play, Settings, Clock } from 'lucide-react';
 import { cn } from '../lib/utils';
 import {
   getChannelStatus,
@@ -9,6 +9,10 @@ import {
   getChannelHealthList,
   updateChannelHealth,
   refreshChannelHealth as refreshChannelHealthApi,
+  sendHeartbeat,
+  updateHealthConfig,
+  degradeChannel as degradeChannelApi,
+  restoreChannel as restoreChannelApi,
 } from '../api/channel';
 import type { Channel, ChannelHealth } from '../../shared/types';
 
@@ -42,6 +46,14 @@ export default function ChannelManage() {
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
   const [config, setConfig] = useState('');
   const [saving, setSaving] = useState(false);
+  const [showDegradeModal, setShowDegradeModal] = useState(false);
+  const [degradeChannelId, setDegradeChannelId] = useState<number | null>(null);
+  const [degradeReason, setDegradeReason] = useState('');
+  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [configChannelId, setConfigChannelId] = useState<number | null>(null);
+  const [configThreshold, setConfigThreshold] = useState(3);
+  const [configEnabled, setConfigEnabled] = useState(true);
+  const [heartbeatLoading, setHeartbeatLoading] = useState<number | null>(null);
 
   const loadData = async () => {
     setLoading(true);
@@ -157,6 +169,83 @@ export default function ChannelManage() {
     }
   };
 
+  const handleHeartbeat = async (channelId: number) => {
+    setHeartbeatLoading(channelId);
+    try {
+      const result = await sendHeartbeat(channelId);
+      setChannelHealthData({ ...channelHealthData, [channelId]: result.health });
+      if (result.was_degraded) {
+        alert('心跳上报成功，渠道已从降级状态恢复');
+      }
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHeartbeatLoading(null);
+    }
+  };
+
+  const handleOpenDegrade = (channelId: number) => {
+    setDegradeChannelId(channelId);
+    setDegradeReason('');
+    setShowDegradeModal(true);
+  };
+
+  const handleDegrade = async () => {
+    if (!degradeChannelId || !degradeReason.trim()) {
+      alert('请输入降级原因');
+      return;
+    }
+    try {
+      const updated = await degradeChannelApi(degradeChannelId, degradeReason);
+      setChannelHealthData({ ...channelHealthData, [degradeChannelId]: updated });
+      setShowDegradeModal(false);
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
+  const handleRestore = async (channelId: number) => {
+    if (!confirm('确定要恢复该渠道吗？这将清除降级状态和失败计数。')) return;
+    try {
+      const updated = await restoreChannelApi(channelId);
+      setChannelHealthData({ ...channelHealthData, [channelId]: updated });
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
+  const handleOpenConfig = (channelId: number) => {
+    const health = channelHealthData[channelId];
+    setConfigChannelId(channelId);
+    setConfigThreshold(health?.degradation_threshold ?? 3);
+    setConfigEnabled(health?.is_health_check_enabled ?? true);
+    setShowConfigModal(true);
+  };
+
+  const handleSaveConfig = async () => {
+    if (!configChannelId) return;
+    if (configThreshold < 1 || configThreshold > 100) {
+      alert('降级阈值必须在1-100之间');
+      return;
+    }
+    try {
+      const updated = await updateHealthConfig(configChannelId, {
+        degradation_threshold: configThreshold,
+        is_health_check_enabled: configEnabled,
+      });
+      setChannelHealthData({ ...channelHealthData, [configChannelId]: updated });
+      setShowConfigModal(false);
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
+  const formatTime = (timeStr: string | null): string => {
+    if (!timeStr) return '从未';
+    const d = new Date(timeStr);
+    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -223,6 +312,7 @@ export default function ChannelManage() {
                 {channelHealthData[channel.id] && (() => {
                   const health = channelHealthData[channel.id];
                   const healthColor = health.success_rate >= 0.8 ? 'text-green-600' : health.success_rate >= 0.5 ? 'text-yellow-600' : 'text-red-600';
+                  const isDegraded = health.is_degraded;
                   const rateLimitBadge = health.rate_limit_status === 'normal' ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-green-100 text-green-700"><Shield className="w-3 h-3" />正常</span>
                   ) : health.rate_limit_status === 'limited' ? (
@@ -231,16 +321,35 @@ export default function ChannelManage() {
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700"><XCircle className="w-3 h-3" />已阻断</span>
                   );
                   return (
-                    <div className="space-y-2 mb-4 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => { setHealthChannelId(channel.id); setShowHealthModal(true); }}>
-                      <div className="flex items-center justify-between">
+                    <div className="space-y-2 mb-4 p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between cursor-pointer hover:bg-gray-100 -m-1 p-1 rounded transition-colors" onClick={() => { setHealthChannelId(channel.id); setShowHealthModal(true); }}>
                         <div className="flex items-center gap-2">
                           <Activity className="w-4 h-4 text-gray-400" />
                           <span className="text-sm text-gray-600">健康度</span>
                         </div>
                         <span className={cn('text-sm font-bold', healthColor)}>{(health.success_rate * 100).toFixed(0)}%</span>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-between text-xs text-gray-500">
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          心跳: {formatTime(health.last_heartbeat)}
+                        </span>
+                        <span className={cn('font-medium', health.consecutive_failures > 0 ? 'text-red-600' : 'text-gray-500')}>
+                          连续失败: {health.consecutive_failures}/{health.degradation_threshold}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
                         {rateLimitBadge}
+                        {isDegraded && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700 animate-pulse">
+                            <Pause className="w-3 h-3" />已降级
+                          </span>
+                        )}
+                        {!health.is_health_check_enabled && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-gray-200 text-gray-600">
+                            <XCircle className="w-3 h-3" />检查已关
+                          </span>
+                        )}
                         {health.responsible_person && (
                           <span className="flex items-center gap-1 text-xs text-gray-500">
                             <User className="w-3 h-3" />
@@ -248,12 +357,50 @@ export default function ChannelManage() {
                           </span>
                         )}
                       </div>
-                      {health.last_failure_reason && (
+                      {isDegraded && health.last_failure_reason && (
                         <div className="flex items-center gap-1 text-xs text-red-500">
-                          <AlertTriangle className="w-3 h-3" />
+                          <AlertTriangle className="w-3 h-3 flex-shrink-0" />
                           <span className="truncate">{health.last_failure_reason}</span>
                         </div>
                       )}
+                      <div className="flex items-center gap-1 pt-1 border-t border-gray-200">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleHeartbeat(channel.id); }}
+                          disabled={heartbeatLoading === channel.id}
+                          className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 text-xs font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded transition-colors disabled:opacity-50"
+                          title="发送心跳"
+                        >
+                          <Heart className={cn('w-3 h-3', heartbeatLoading === channel.id && 'animate-ping')} />
+                          心跳
+                        </button>
+                        {isDegraded ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleRestore(channel.id); }}
+                            className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded transition-colors"
+                            title="恢复渠道"
+                          >
+                            <Play className="w-3 h-3" />
+                            恢复
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleOpenDegrade(channel.id); }}
+                            className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 rounded transition-colors"
+                            title="手动降级"
+                          >
+                            <Pause className="w-3 h-3" />
+                            降级
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleOpenConfig(channel.id); }}
+                          className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded transition-colors"
+                          title="健康检查配置"
+                        >
+                          <Settings className="w-3 h-3" />
+                          配置
+                        </button>
+                      </div>
                     </div>
                   );
                 })()}
@@ -547,6 +694,55 @@ export default function ChannelManage() {
                   </div>
                 </div>
 
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-1">最近心跳</p>
+                    <p className="text-sm text-gray-700 flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5" />
+                      {formatTime(health.last_heartbeat)}
+                    </p>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-1">连续失败 / 阈值</p>
+                    <p className={cn('text-sm font-bold', health.consecutive_failures > 0 ? 'text-red-600' : 'text-gray-700')}>
+                      {health.consecutive_failures} / {health.degradation_threshold}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-1">健康检查</p>
+                    <span className={cn(
+                      'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium',
+                      health.is_health_check_enabled ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'
+                    )}>
+                      {health.is_health_check_enabled ? <CheckCircle className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                      {health.is_health_check_enabled ? '已启用' : '已禁用'}
+                    </span>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-1">降级状态</p>
+                    {health.is_degraded ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700">
+                        <Pause className="w-3 h-3" />
+                        已降级
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-green-100 text-green-700">
+                        <CheckCircle className="w-3 h-3" />
+                        正常
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {health.is_degraded && health.degraded_at && (
+                  <div className="p-3 bg-red-50 rounded-lg text-xs text-red-600">
+                    降级时间: {formatTime(health.degraded_at)}
+                  </div>
+                )}
+
                 {health.last_failure_reason && (
                   <div className="p-4 bg-red-50 rounded-lg">
                     <div className="flex items-center gap-2 mb-1">
@@ -563,13 +759,47 @@ export default function ChannelManage() {
                 </div>
               </div>
 
-              <div className="flex gap-4 mt-8">
+              <div className="flex gap-3 mt-8">
+                <button
+                  onClick={() => handleHeartbeat(healthChannelId)}
+                  disabled={heartbeatLoading === healthChannelId}
+                  className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-green-300 text-green-700 hover:bg-green-50 transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <Heart className={cn('w-4 h-4', heartbeatLoading === healthChannelId && 'animate-ping')} />
+                  发送心跳
+                </button>
+                {health.is_degraded ? (
+                  <button
+                    onClick={() => { handleRestore(healthChannelId); setShowHealthModal(false); }}
+                    className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors inline-flex items-center justify-center gap-2"
+                  >
+                    <Play className="w-4 h-4" />
+                    恢复渠道
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => { setShowHealthModal(false); handleOpenDegrade(healthChannelId); }}
+                    className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-orange-300 text-orange-700 hover:bg-orange-50 transition-colors inline-flex items-center justify-center gap-2"
+                  >
+                    <Pause className="w-4 h-4" />
+                    手动降级
+                  </button>
+                )}
+              </div>
+              <div className="flex gap-3 mt-3">
                 <button
                   onClick={handleRefreshHealth}
                   className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-2"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  刷新健康度
+                  刷新
+                </button>
+                <button
+                  onClick={() => { setShowHealthModal(false); handleOpenConfig(healthChannelId); }}
+                  className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-2"
+                >
+                  <Settings className="w-4 h-4" />
+                  健康配置
                 </button>
                 <button
                   onClick={() => { setShowHealthModal(false); setEditingResponsible(false); }}
@@ -582,6 +812,117 @@ export default function ChannelManage() {
           </div>
         );
       })()}
+
+      {showDegradeModal && degradeChannelId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl w-full max-w-md p-6 animate-scale-in">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Pause className="w-5 h-5 text-orange-600" />
+                手动降级渠道
+              </h3>
+              <button onClick={() => setShowDegradeModal(false)} className="p-1 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600">
+                降级后，该渠道的待发布排期将自动转入待复核队列，新排期也将被阻止。请输入降级原因：
+              </p>
+              <textarea
+                value={degradeReason}
+                onChange={(e) => setDegradeReason(e.target.value)}
+                placeholder="请输入降级原因，如：接口维护中、认证过期等..."
+                rows={3}
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition-all outline-none resize-none"
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-4 mt-8">
+              <button
+                onClick={() => setShowDegradeModal(false)}
+                className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleDegrade}
+                disabled={!degradeReason.trim()}
+                className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-orange-600 text-white hover:bg-orange-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                确认降级
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showConfigModal && configChannelId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl w-full max-w-md p-6 animate-scale-in">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-[#1e3a5f]" />
+                健康检查配置
+              </h3>
+              <button onClick={() => setShowConfigModal(false)} className="p-1 hover:bg-gray-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="space-y-5">
+              <div>
+                <label className="flex items-center justify-between p-4 bg-gray-50 rounded-lg cursor-pointer">
+                  <div>
+                    <p className="text-sm font-medium text-gray-700">启用健康检查</p>
+                    <p className="text-xs text-gray-500 mt-1">关闭后将不进行心跳检测和自动降级</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setConfigEnabled(!configEnabled)}
+                    className={cn(
+                      'relative w-12 h-6 rounded-full transition-colors',
+                      configEnabled ? 'bg-green-500' : 'bg-gray-300'
+                    )}
+                  >
+                    <span className={cn(
+                      'absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform',
+                      configEnabled ? 'translate-x-6' : 'translate-x-0.5'
+                    )} />
+                  </button>
+                </label>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  自动降级阈值（连续失败次数）
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={configThreshold}
+                  onChange={(e) => setConfigThreshold(parseInt(e.target.value) || 1)}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#1e3a5f] focus:border-[#1e3a5f] transition-all outline-none"
+                />
+                <p className="text-xs text-gray-500 mt-1">连续发布失败达到此次数后，渠道将被自动降级。范围：1-100</p>
+              </div>
+            </div>
+            <div className="flex gap-4 mt-8">
+              <button
+                onClick={() => setShowConfigModal(false)}
+                className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSaveConfig}
+                className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-[#1e3a5f] text-white hover:bg-[#2d4a6f] transition-colors"
+              >
+                保存配置
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes scale-in {

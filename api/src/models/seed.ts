@@ -68,7 +68,7 @@ export function seedData(): void {
     'INSERT OR IGNORE INTO sensitive_words (word, category, version, is_active) VALUES (?, ?, ?, ?)'
   );
   const insertChannelHealth = db.prepare(
-    'INSERT OR IGNORE INTO channel_health (channel_id, success_rate, rate_limit_status, responsible_person, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)'
+    'INSERT OR IGNORE INTO channel_health (channel_id, success_rate, rate_limit_status, responsible_person, is_health_check_enabled, last_heartbeat, consecutive_failures, degradation_threshold, is_degraded, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
   );
 
   const transaction = db.transaction(() => {
@@ -87,7 +87,7 @@ export function seedData(): void {
 
     const channelRows = db.prepare('SELECT id FROM channels').all() as { id: number }[];
     for (const row of channelRows) {
-      insertChannelHealth.run(row.id, 1.0, 'normal', null);
+      insertChannelHealth.run(row.id, 1.0, 'normal', null, 1, new Date().toISOString(), 0, 3, 0);
     }
   });
 

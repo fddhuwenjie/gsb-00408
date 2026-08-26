@@ -1,4 +1,4 @@
-import { transaction } from '../db/index.js'
+import db, { transaction } from '../db/index.js'
 import { createError } from '../types/index.js'
 import PublishRecordModel from '../models/PublishRecord.js'
 import ScheduleModel from '../models/Schedule.js'
@@ -6,6 +6,8 @@ import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
 import ChannelHealthModel from '../models/ChannelHealth.js'
 import FailureReviewModel from '../models/FailureReview.js'
+import AuditLogModel from '../models/AuditLog.js'
+import * as HealthCheckService from './HealthCheckService.js'
 import type {
   PublishRecord,
   Content,
@@ -20,9 +22,11 @@ import type {
 
 export async function executePublish(
   scheduleId: number,
+  operatorId?: number,
+  ipAddress?: string,
 ): Promise<PublishRecord> {
   const schedule = await ScheduleModel.findById(scheduleId)
-  
+
   if (!schedule) {
     throw createError('排期不存在', 404, 'SCHEDULE_NOT_FOUND')
   }
@@ -49,69 +53,93 @@ export async function executePublish(
     throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
   }
 
-  if (channel.status !== 'active') {
-    throw createError('渠道未激活', 400, 'CHANNEL_INACTIVE')
+  const healthCheck = await HealthCheckService.checkChannelHealthBeforePublish(schedule.channel_id)
+  if (!healthCheck.allowed) {
+    const blockNow = new Date().toISOString()
+    transaction(() => {
+      db.prepare("UPDATE schedules SET status = 'pending_review', updated_at = ? WHERE id = ?").run(blockNow, scheduleId)
+      const existing = db.prepare("SELECT id FROM failure_reviews WHERE schedule_id = ? AND status = 'pending'").get(scheduleId) as { id: number } | undefined
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO failure_reviews (publish_record_id, schedule_id, reason, status, created_at)
+          VALUES (NULL, ?, ?, 'pending', ?)
+        `).run(scheduleId, healthCheck.reason || '渠道健康检查未通过', blockNow)
+      }
+    })
+
+    await AuditLogModel.create({
+      operator_id: operatorId ?? null,
+      action: 'schedule_publish_blocked',
+      resource_type: 'schedule',
+      resource_id: scheduleId,
+      detail: `排期发布被拦截: ${healthCheck.reason}，已转入待复核`,
+      ip_address: ipAddress ?? null,
+    })
+
+    throw createError(healthCheck.reason || '渠道健康检查未通过，任务已转入待复核', 503, 'CHANNEL_DEGRADED')
   }
 
-  return transaction(async () => {
-    const publishTime = new Date().toISOString()
-    const publishResult = await simulatePublish(content, channel)
+  const publishTime = new Date().toISOString()
+  const publishResult = await simulatePublish(content, channel)
 
-    let status: PublishStatus = 'success'
-    let resultMessage = '发布成功'
+  const status: PublishStatus = publishResult.success ? 'success' : 'failed'
+  const resultMessage = publishResult.success ? '发布成功' : (publishResult.error || '发布失败')
 
-    if (!publishResult.success) {
-      status = 'failed'
-      resultMessage = publishResult.error || '发布失败'
-    }
+  const publishRecord = transaction(() => {
+    const existingRecord = db.prepare('SELECT * FROM publish_records WHERE schedule_id = ? ORDER BY id DESC LIMIT 1').get(scheduleId) as Record<string, unknown> | undefined
 
-    const existingRecord = await PublishRecordModel.getLatestByScheduleId(scheduleId)
-
-    let publishRecord: PublishRecord
-
+    let recordId: number
     if (existingRecord) {
-      const updated = await PublishRecordModel.update(existingRecord.id, {
-        status,
-        result: resultMessage,
-        publish_time: publishTime,
-      })
-
-      if (!updated) {
-        throw createError('更新发布记录失败', 500, 'UPDATE_FAILED')
-      }
-
-      publishRecord = updated
+      recordId = existingRecord.id as number
+      db.prepare('UPDATE publish_records SET status = ?, result = ?, publish_time = ? WHERE id = ?')
+        .run(status, resultMessage, publishTime, recordId)
     } else {
-      publishRecord = await PublishRecordModel.create({
-        schedule_id: scheduleId,
-        status,
-        result: resultMessage,
-        publish_time: publishTime,
-      })
+      const result = db.prepare(`
+        INSERT INTO publish_records (schedule_id, status, result, publish_time, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(scheduleId, status, resultMessage, publishTime, publishTime)
+      recordId = result.lastInsertRowid as number
     }
 
     if (status === 'success') {
-      await ScheduleModel.update(scheduleId, {
-        status: 'published',
-      })
-
-      await ContentModel.update(schedule.content_id, {
-        status: 'published',
-      })
-
-      await ChannelHealthModel.recalculate(channel.id)
+      db.prepare("UPDATE schedules SET status = 'published', updated_at = ? WHERE id = ?").run(publishTime, scheduleId)
+      db.prepare("UPDATE contents SET status = 'published', updated_at = ? WHERE id = ?").run(publishTime, schedule.content_id)
     }
 
-    if (status === 'failed') {
-      await ChannelHealthModel.recalculate(channel.id)
-      await FailureReviewModel.create({
-        publish_record_id: publishRecord.id,
-        schedule_id: scheduleId,
-      })
-    }
-
-    return publishRecord
+    const record = db.prepare('SELECT * FROM publish_records WHERE id = ?').get(recordId) as PublishRecord
+    return record
   })
+
+  if (status === 'success') {
+    await ChannelHealthModel.recalculate(channel.id)
+    await HealthCheckService.recordPublishSuccess(channel.id, operatorId, ipAddress)
+  }
+
+  if (status === 'failed') {
+    await ChannelHealthModel.recalculate(channel.id)
+    const { degraded } = await HealthCheckService.recordPublishFailure(
+      channel.id,
+      resultMessage,
+      scheduleId,
+      operatorId,
+      ipAddress,
+    )
+
+    transaction(() => {
+      const now = new Date().toISOString()
+      const newStatus = degraded ? 'pending_review' : 'failed'
+      db.prepare("UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?").run(newStatus, now, scheduleId)
+      const existing = db.prepare("SELECT id FROM failure_reviews WHERE schedule_id = ? AND status = 'pending'").get(scheduleId) as { id: number } | undefined
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO failure_reviews (publish_record_id, schedule_id, reason, status, created_at)
+          VALUES (?, ?, ?, 'pending', ?)
+        `).run(publishRecord.id, scheduleId, resultMessage, now)
+      }
+    })
+  }
+
+  return publishRecord
 }
 
 async function simulatePublish(
@@ -122,13 +150,21 @@ async function simulatePublish(
   void channel
   return new Promise((resolve) => {
     setTimeout(() => {
+      if (process.env.PUBLISH_FORCE_FAILURE === 'true') {
+        resolve({ success: false, error: `注入失败：渠道 ${channel.name} 发布异常（测试模式）` })
+        return
+      }
+      if (process.env.PUBLISH_FORCE_SUCCESS === 'true') {
+        resolve({ success: true })
+        return
+      }
       const random = Math.random()
       if (random > 0.1) {
         resolve({ success: true })
       } else {
         resolve({ success: false, error: '模拟发布失败：网络超时' })
       }
-    }, 100)
+    }, 50)
   })
 }
 
@@ -178,7 +214,7 @@ export async function getPublishRecordDetail(
   recordId: number,
 ): Promise<PublishRecord> {
   const record = await PublishRecordModel.findById(recordId, true)
-  
+
   if (!record) {
     throw createError('发布记录不存在', 404, 'RECORD_NOT_FOUND')
   }
@@ -215,6 +251,8 @@ export async function getPublishStats(
 
 export async function retryPublish(
   scheduleId: number,
+  operatorId?: number,
+  ipAddress?: string,
 ): Promise<PublishRecord> {
   const schedule = await ScheduleModel.findById(scheduleId)
 
@@ -225,7 +263,7 @@ export async function retryPublish(
   const latestRecord = await PublishRecordModel.getLatestByScheduleId(scheduleId)
 
   if (!latestRecord) {
-    return executePublish(scheduleId)
+    return executePublish(scheduleId, operatorId, ipAddress)
   }
 
   if (latestRecord.status === 'success') {
@@ -242,56 +280,51 @@ export async function retryPublish(
     throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
   }
 
-  if (channel.status !== 'active') {
-    throw createError('渠道未激活', 400, 'CHANNEL_INACTIVE')
+  const healthCheck = await HealthCheckService.checkChannelHealthBeforePublish(schedule.channel_id)
+  if (!healthCheck.allowed) {
+    throw createError(healthCheck.reason || '渠道健康检查未通过', 503, 'CHANNEL_DEGRADED')
   }
 
-  return transaction(async () => {
-    const publishTime = new Date().toISOString()
-    const publishResult = await simulatePublish(content, channel)
+  const publishTime = new Date().toISOString()
+  const publishResult = await simulatePublish(content, channel)
+  const status: PublishStatus = publishResult.success ? 'success' : 'failed'
+  const resultMessage = publishResult.success ? '发布成功' : (publishResult.error || '发布失败')
 
-    let status: PublishStatus = 'success'
-    let resultMessage = '发布成功'
-
-    if (!publishResult.success) {
-      status = 'failed'
-      resultMessage = publishResult.error || '发布失败'
-    }
-
-    const updated = await PublishRecordModel.update(latestRecord.id, {
-      status,
-      result: resultMessage,
-      publish_time: publishTime,
-    })
-
-    if (!updated) {
-      throw createError('更新发布记录失败', 500, 'UPDATE_FAILED')
-    }
-
-    const publishRecord = updated
+  const publishRecord = transaction(() => {
+    db.prepare('UPDATE publish_records SET status = ?, result = ?, publish_time = ? WHERE id = ?')
+      .run(status, resultMessage, publishTime, latestRecord.id)
 
     if (status === 'success') {
-      await ScheduleModel.update(scheduleId, {
-        status: 'published',
-      })
-
-      await ContentModel.update(schedule.content_id, {
-        status: 'published',
-      })
-
-      await ChannelHealthModel.recalculate(channel.id)
+      db.prepare("UPDATE schedules SET status = 'published', updated_at = ? WHERE id = ?").run(publishTime, scheduleId)
+      db.prepare("UPDATE contents SET status = 'published', updated_at = ? WHERE id = ?").run(publishTime, schedule.content_id)
     }
 
-    if (status === 'failed') {
-      await ChannelHealthModel.recalculate(channel.id)
-      await FailureReviewModel.create({
-        publish_record_id: publishRecord.id,
-        schedule_id: scheduleId,
-      })
-    }
-
-    return publishRecord
+    return db.prepare('SELECT * FROM publish_records WHERE id = ?').get(latestRecord.id) as PublishRecord
   })
+
+  if (status === 'success') {
+    await ChannelHealthModel.recalculate(channel.id)
+    await HealthCheckService.recordPublishSuccess(channel.id, operatorId, ipAddress)
+  }
+
+  if (status === 'failed') {
+    await ChannelHealthModel.recalculate(channel.id)
+    const { degraded } = await HealthCheckService.recordPublishFailure(
+      channel.id,
+      resultMessage,
+      scheduleId,
+      operatorId,
+      ipAddress,
+    )
+
+    transaction(() => {
+      const now = new Date().toISOString()
+      const newStatus = degraded ? 'pending_review' : 'failed'
+      db.prepare("UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?").run(newStatus, now, scheduleId)
+    })
+  }
+
+  return publishRecord
 }
 
 export async function getFailureReviews(
@@ -304,6 +337,9 @@ export async function getFailureReviewsByStatus(
   status: FailureReviewStatus,
   params?: PaginationParams,
 ): Promise<PaginationResult<FailureReview>> {
+  if (status === 'pending') {
+    return FailureReviewModel.findAllPendingWithRelations(params)
+  }
   return FailureReviewModel.findByStatus(status, params)
 }
 
@@ -312,6 +348,7 @@ export async function resolveFailureReview(
   handlerId: number,
   conclusion: string,
   actionType: FailureReviewAction,
+  ipAddress?: string,
 ): Promise<FailureReview | null> {
   const resolved = await FailureReviewModel.resolve(reviewId, handlerId, conclusion, actionType)
 
@@ -319,16 +356,85 @@ export async function resolveFailureReview(
     throw createError('失败复核不存在', 404, 'FAILURE_REVIEW_NOT_FOUND')
   }
 
+  await AuditLogModel.create({
+    operator_id: handlerId,
+    action: 'failure_review_resolve',
+    resource_type: 'failure_review',
+    resource_id: reviewId,
+    detail: `处理失败复核 #${reviewId}，结论: ${conclusion}，操作: ${actionType}`,
+    ip_address: ipAddress ?? null,
+  })
+
   if (actionType === 'republish') {
     const scheduleId = resolved.schedule_id
     const schedule = await ScheduleModel.findById(scheduleId)
 
-    if (schedule && (schedule.status === 'failed' || schedule.status === 'scheduled' || schedule.status === 'approved')) {
-      await retryPublish(scheduleId)
+    if (schedule && (schedule.status === 'failed' || schedule.status === 'scheduled' || schedule.status === 'approved' || schedule.status === 'pending_review')) {
+      await ScheduleModel.update(scheduleId, { status: 'scheduled' })
+      await retryPublish(scheduleId, handlerId, ipAddress)
     }
   }
 
   return resolved
+}
+
+export async function rescheduleFromReview(
+  reviewId: number,
+  scheduleTime: string,
+  handlerId: number,
+  ipAddress?: string,
+): Promise<FailureReview | null> {
+  const review = await FailureReviewModel.findById(reviewId, true)
+  if (!review) {
+    throw createError('复核记录不存在', 404, 'REVIEW_NOT_FOUND')
+  }
+
+  if (review.status === 'resolved') {
+    throw createError('该复核记录已处理', 400, 'REVIEW_ALREADY_RESOLVED')
+  }
+
+  const schedule = review.schedule
+  if (!schedule) {
+    throw createError('关联排期不存在', 404, 'SCHEDULE_NOT_FOUND')
+  }
+
+  const healthCheck = await HealthCheckService.checkChannelHealthBeforePublish(schedule.channel_id)
+  if (!healthCheck.allowed) {
+    throw createError(healthCheck.reason || '渠道健康检查未通过，无法重新排期', 503, 'CHANNEL_DEGRADED')
+  }
+
+  await ScheduleModel.update(schedule.id, {
+    schedule_time: scheduleTime,
+    status: 'scheduled',
+  })
+
+  const updated = await FailureReviewModel.update(reviewId, {
+    handler_id: handlerId,
+    conclusion: `人工重新排期至 ${scheduleTime}`,
+    action_type: 'reschedule',
+    status: 'resolved',
+    resolved_at: new Date().toISOString(),
+  })
+
+  await AuditLogModel.create({
+    operator_id: handlerId,
+    action: 'failure_review_reschedule',
+    resource_type: 'failure_review',
+    resource_id: reviewId,
+    detail: `复核 #${reviewId} 重新排期，排期ID: ${schedule.id}，新时间: ${scheduleTime}`,
+    ip_address: ipAddress ?? null,
+  })
+
+  await AuditLogModel.create({
+    operator_id: handlerId,
+    action: 'schedule_reschedule',
+    resource_type: 'schedule',
+    resource_id: schedule.id,
+    detail: `从失败复核重新排期至 ${scheduleTime}`,
+    ip_address: ipAddress ?? null,
+  })
+
+  return updated
 }
 
 export default {
@@ -340,4 +446,5 @@ export default {
   getFailureReviews,
   getFailureReviewsByStatus,
   resolveFailureReview,
+  rescheduleFromReview,
 }

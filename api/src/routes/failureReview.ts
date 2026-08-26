@@ -33,6 +33,22 @@ router.get(
   }),
 )
 
+router.get(
+  '/:id',
+  requireRole('reviewer', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的复盘ID', 400)
+    const review = await import('../models/FailureReview.js').then(m => m.default.findById(id, true))
+    if (!review) throw createError('复盘记录不存在', 404)
+    const response: ApiResponse<typeof review> = {
+      success: true,
+      data: review,
+    }
+    res.status(200).json(response)
+  }),
+)
+
 router.post(
   '/:id/resolve',
   requireRole('admin'),
@@ -40,10 +56,30 @@ router.post(
     if (!req.user) throw createError('用户未登录', 401)
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) throw createError('无效的复盘ID', 400)
-    const { conclusion, action_type } = req.body as { conclusion: string; action_type: 'republish' | 'manual_publish' }
+    const { conclusion, action_type } = req.body as { conclusion: string; action_type: 'republish' | 'manual_publish' | 'reschedule' }
     if (!conclusion || conclusion.trim().length === 0) throw createError('处理结论不能为空', 400)
-    if (!action_type || !['republish', 'manual_publish'].includes(action_type)) throw createError('处理方式无效', 400)
-    const result = await PublishService.resolveFailureReview(id, req.user.id, conclusion, action_type)
+    if (!action_type || !['republish', 'manual_publish', 'reschedule'].includes(action_type)) throw createError('处理方式无效', 400)
+    const result = await PublishService.resolveFailureReview(id, req.user.id, conclusion, action_type, req.ip)
+    const response: ApiResponse<typeof result> = {
+      success: true,
+      data: result,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/reschedule',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的复盘ID', 400)
+    const { schedule_time } = req.body as { schedule_time: string }
+    if (!schedule_time || schedule_time.trim().length === 0) {
+      throw createError('重新排期时间不能为空', 400)
+    }
+    const result = await PublishService.rescheduleFromReview(id, schedule_time, req.user.id, req.ip)
     const response: ApiResponse<typeof result> = {
       success: true,
       data: result,

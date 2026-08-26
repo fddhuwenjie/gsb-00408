@@ -1,4 +1,5 @@
 import { db } from '../db/index.js'
+import ChannelHealthModel from '../models/ChannelHealth.js'
 import type { DashboardStats } from '../../../shared/types.js'
 
 export async function getDashboardStats(): Promise<DashboardStats> {
@@ -11,6 +12,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const totalPublishResult = db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success FROM publish_records").get() as { total: number; success: number }
   const highRiskResult = db.prepare("SELECT COUNT(*) as count FROM channel_health WHERE rate_limit_status = 'blocked' OR success_rate < 0.5").get() as { count: number }
   const pendingFailureReviewResult = db.prepare("SELECT COUNT(*) as count FROM failure_reviews WHERE status = 'pending'").get() as { count: number }
+  const degradedChannelCount = await ChannelHealthModel.countDegraded()
 
   const successRate = (totalPublishResult.total || 0) > 0
     ? Math.round(((totalPublishResult.success || 0) / totalPublishResult.total) * 1000) / 10
@@ -23,5 +25,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     publish_success_rate: successRate,
     high_risk_channel_count: highRiskResult.count || 0,
     pending_failure_review_count: pendingFailureReviewResult.count || 0,
+    degraded_channel_count: degradedChannelCount,
   }
 }

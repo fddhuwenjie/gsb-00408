@@ -5,6 +5,7 @@ import { createError } from '../types/index.js'
 import ScheduleModel from '../models/Schedule.js'
 import ContentModel from '../models/Content.js'
 import ChannelModel from '../models/Channel.js'
+import AuditLogModel from '../models/AuditLog.js'
 import ScheduleService from '../services/ScheduleService.js'
 import { validateScheduleTime, validateDuplicateSchedule, validateSensitiveWordsHandled } from '../utils/validator.js'
 import { schedulePublishTask, cancelPublishTask } from '../scheduler/publishTask.js'
@@ -169,6 +170,15 @@ router.post(
 
     await schedulePublishTask(schedule.id, schedule.schedule_time)
 
+    await AuditLogModel.create({
+      operator_id: req.user.id,
+      action: 'schedule_reschedule',
+      resource_type: 'schedule',
+      resource_id: schedule.id,
+      detail: `创建排期，内容ID: ${content_id}，渠道ID: ${channel_id}，排期时间: ${schedule_time}`,
+      ip_address: req.ip,
+    })
+
     const response: ApiResponse<{ schedule: Schedule; risk_warning?: ScheduleRiskWarning }> = {
       success: true,
       data: { schedule, risk_warning },
@@ -262,6 +272,18 @@ router.put(
       await schedulePublishTask(updatedSchedule.id, newScheduleTime)
     }
 
+    const updateDetails: string[] = []
+    if (channel_id !== undefined) updateDetails.push(`渠道ID: ${channel_id}`)
+    if (schedule_time !== undefined) updateDetails.push(`排期时间: ${schedule_time}`)
+    await AuditLogModel.create({
+      operator_id: req.user.id,
+      action: 'schedule_reschedule',
+      resource_type: 'schedule',
+      resource_id: id,
+      detail: `修改排期${updateDetails.length > 0 ? ' - ' + updateDetails.join(', ') : ''}`,
+      ip_address: req.ip,
+    })
+
     const response: ApiResponse<Schedule> = {
       success: true,
       data: updatedSchedule!,
@@ -313,11 +335,70 @@ router.post(
       await ContentModel.updateStatus(schedule.content_id, 'review_approved')
     }
 
+    await AuditLogModel.create({
+      operator_id: req.user.id,
+      action: 'schedule_reschedule',
+      resource_type: 'schedule',
+      resource_id: id,
+      detail: `撤回排期，原因: ${reason}`,
+      ip_address: req.ip,
+    })
+
     const response: ApiResponse<Schedule> = {
       success: true,
       data: updatedSchedule,
     }
 
+    res.status(200).json(response)
+  }),
+)
+
+router.get(
+  '/pending-review/list',
+  requireRole('reviewer', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    const page = req.query.page ? parseInt(req.query.page as string) : 1
+    const pageSize = req.query.pageSize ? parseInt(req.query.pageSize as string) : 10
+    const result = await ScheduleService.getPendingReviewSchedules({ page, pageSize })
+    const itemsWithRelations = await Promise.all(
+      result.items.map(async (schedule) => {
+        const scheduleWithRelations = await ScheduleModel.findById(schedule.id, true)
+        return scheduleWithRelations || schedule
+      }),
+    )
+    const response: ApiResponse<PaginationResult<Schedule>> = {
+      success: true,
+      data: {
+        ...result,
+        items: itemsWithRelations,
+      },
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/reschedule',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的排期ID', 400)
+    const { schedule_time } = req.body as { schedule_time: string }
+    if (!schedule_time || schedule_time.trim().length === 0) {
+      throw createError('排期时间不能为空', 400)
+    }
+    const updated = await ScheduleService.reschedulePendingReview(
+      id,
+      schedule_time,
+      req.user.id,
+      req.ip,
+    )
+    await schedulePublishTask(updated.id, updated.schedule_time)
+    const response: ApiResponse<Schedule> = {
+      success: true,
+      data: updated,
+    }
     res.status(200).json(response)
   }),
 )
@@ -359,6 +440,15 @@ router.delete(
     if (schedule.content_id) {
       await ContentModel.updateStatus(schedule.content_id, 'review_approved')
     }
+
+    await AuditLogModel.create({
+      operator_id: req.user.id,
+      action: 'schedule_reschedule',
+      resource_type: 'schedule',
+      resource_id: id,
+      detail: `删除排期（撤回），原因: ${defaultReason}`,
+      ip_address: req.ip,
+    })
 
     const response: ApiResponse<Schedule> = {
       success: true,

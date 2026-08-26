@@ -1,86 +1,77 @@
 import schedule from 'node-schedule'
-import db, { transaction } from '../db/index.js'
+import db from '../db/index.js'
 import ScheduleModel from '../models/Schedule.js'
-import PublishRecordModel from '../models/PublishRecord.js'
+import * as PublishService from '../services/PublishService.js'
+import * as HealthCheckService from '../services/HealthCheckService.js'
 import type { Schedule } from '../../../shared/types.js'
 
 const scheduledTasks = new Map<number, schedule.Job>()
 
-export const PublishService = {
+const HEARTBEAT_CHECK_INTERVAL_MINUTES = 5
+const HEARTBEAT_STALE_THRESHOLD_MINUTES = 10
+
+export const PublishTaskService = {
   async executePublish(scheduleId: number): Promise<void> {
-    console.log(`[PublishService] 开始执行发布任务，排期ID: ${scheduleId}`)
+    console.log(`[PublishScheduler] 开始执行发布任务，排期ID: ${scheduleId}`)
 
     try {
-      const scheduleRecord = await ScheduleModel.findById(scheduleId, true)
-
-      if (!scheduleRecord) {
-        console.error(`[PublishService] 排期不存在，ID: ${scheduleId}`)
-        return
-      }
-
-      if (scheduleRecord.status !== 'scheduled') {
-        console.log(`[PublishService] 排期状态不是 scheduled，跳过发布，ID: ${scheduleId}`)
-        return
-      }
-
-      const publishTime = new Date().toISOString()
-      const result = await simulatePublish(scheduleRecord)
-
-      transaction((tx) => {
-        tx.prepare(
-          'UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?',
-        ).run('published', publishTime, scheduleId)
-
-        tx.prepare(
-          'UPDATE contents SET status = ?, updated_at = ? WHERE id = ?',
-        ).run('published', publishTime, scheduleRecord.content_id)
-
-        tx.prepare(`
-          INSERT INTO publish_records (schedule_id, status, result, publish_time, created_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(
-          scheduleId,
-          result.success ? 'success' : 'failed',
-          result.message,
-          publishTime,
-          publishTime,
-        )
-      })
-
-      console.log(`[PublishService] 发布任务完成，排期ID: ${scheduleId}`)
+      await PublishService.executePublish(scheduleId)
+      console.log(`[PublishScheduler] 发布任务完成，排期ID: ${scheduleId}`)
     } catch (error) {
-      console.error(`[PublishService] 发布任务失败，排期ID: ${scheduleId}`, error)
-
-      const publishTime = new Date().toISOString()
-
-      await PublishRecordModel.create({
-        schedule_id: scheduleId,
-        status: 'failed',
-        result: error instanceof Error ? error.message : '未知错误',
-        publish_time: publishTime,
-      })
-
-      await ScheduleModel.updateStatus(scheduleId, 'published')
+      const err = error as { statusCode?: number; code?: string; message?: string }
+      if (err.statusCode === 503 && err.code === 'CHANNEL_DEGRADED') {
+        console.warn(`[PublishScheduler] 渠道已降级，排期 ${scheduleId} 已转入待复核: ${err.message}`)
+      } else {
+        console.error(`[PublishScheduler] 发布任务失败，排期ID: ${scheduleId}`, error)
+      }
     } finally {
       scheduledTasks.delete(scheduleId)
     }
   },
 }
 
-async function simulatePublish(
-  scheduleRecord: Schedule,
-): Promise<{ success: boolean; message: string }> {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const success = Math.random() > 0.1
-      resolve({
-        success,
-        message: success
-          ? `内容 "${scheduleRecord.content?.title}" 已成功发布到 ${scheduleRecord.channel?.name}`
-          : `发布失败：网络连接超时`,
-      })
-    }, 1000)
+let heartbeatCheckJob: schedule.Job | null = null
+
+export function initHeartbeatChecker(): void {
+  console.log('[HeartbeatChecker] 初始化心跳巡检任务...')
+
+  heartbeatCheckJob = schedule.scheduleJob(`*/${HEARTBEAT_CHECK_INTERVAL_MINUTES} * * * *`, async () => {
+    console.log('[HeartbeatChecker] 开始检查渠道心跳...')
+    try {
+      const { degraded } = await HealthCheckService.checkStaleHeartbeats(HEARTBEAT_STALE_THRESHOLD_MINUTES)
+      if (degraded.length > 0) {
+        console.warn(`[HeartbeatChecker] ${degraded.length} 个渠道因心跳超时被自动降级`)
+        for (const health of degraded) {
+          const channel = health.channel
+          if (channel) {
+            const pendingSchedules = await ScheduleModel.findByChannelIdAndTimeRange(
+              health.channel_id,
+              new Date().toISOString(),
+              new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+              { page: 1, pageSize: 100 },
+            )
+            for (const s of pendingSchedules.items) {
+              cancelPublishTask(s.id)
+            }
+          }
+        }
+      } else {
+        console.log('[HeartbeatChecker] 所有渠道心跳正常')
+      }
+    } catch (error) {
+      console.error('[HeartbeatChecker] 心跳检查失败:', error)
+    }
   })
+
+  console.log(`[HeartbeatChecker] 心跳巡检任务已启动，每 ${HEARTBEAT_CHECK_INTERVAL_MINUTES} 分钟检查一次`)
+}
+
+export function stopHeartbeatChecker(): void {
+  if (heartbeatCheckJob) {
+    heartbeatCheckJob.cancel()
+    heartbeatCheckJob = null
+    console.log('[HeartbeatChecker] 心跳巡检任务已停止')
+  }
 }
 
 export function initPublishScheduler(): void {
@@ -112,7 +103,7 @@ export function schedulePublishTask(scheduleId: number, scheduleTime: string): v
 
   if (scheduleDate <= now) {
     console.log(`[PublishScheduler] 排期时间已过，立即执行发布，排期ID: ${scheduleId}`)
-    PublishService.executePublish(scheduleId)
+    PublishTaskService.executePublish(scheduleId)
     return
   }
 
@@ -123,7 +114,7 @@ export function schedulePublishTask(scheduleId: number, scheduleTime: string): v
 
   const job = schedule.scheduleJob(scheduleDate, () => {
     console.log(`[PublishScheduler] 定时任务触发，排期ID: ${scheduleId}`)
-    PublishService.executePublish(scheduleId)
+    PublishTaskService.executePublish(scheduleId)
   })
 
   scheduledTasks.set(scheduleId, job)
@@ -147,7 +138,9 @@ export function cancelPublishTask(scheduleId: number): void {
 
 export default {
   initPublishScheduler,
+  initHeartbeatChecker,
+  stopHeartbeatChecker,
   schedulePublishTask,
   cancelPublishTask,
-  PublishService,
+  PublishTaskService,
 }
