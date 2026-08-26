@@ -11,6 +11,7 @@ import SensitiveWords from '@/pages/SensitiveWords';
 import RiskDetails from '@/pages/RiskDetails';
 import PublishRecords from '@/pages/PublishRecords';
 import ChannelManage from '@/pages/ChannelManage';
+import FailureReviews from '@/pages/FailureReviews';
 import useAuthStore from '@/store/useAuthStore';
 import type { UserRole } from '@/types';
 
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="sensitive/words" element={<ProtectedRoute roles={['admin']}><SensitiveWords /></ProtectedRoute>} />
           <Route path="sensitive/details" element={<ProtectedRoute roles={['reviewer', 'admin']}><RiskDetails /></ProtectedRoute>} />
           <Route path="publish/records" element={<PublishRecords />} />
+          <Route path="failure-reviews" element={<ProtectedRoute roles={['reviewer', 'admin']}><FailureReviews /></ProtectedRoute>} />
           <Route path="channels" element={<ProtectedRoute roles={['admin']}><ChannelManage /></ProtectedRoute>} />
         </Route>
         

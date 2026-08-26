@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Edit2, Trash2, Eye, X, CheckCircle, XCircle, Calendar, Activity, AlertTriangle, Shield, User, RefreshCw } from 'lucide-react';
+import { Plus, Edit2, Trash2, Eye, X, CheckCircle, XCircle, Calendar, Activity, AlertTriangle, Shield, User, RefreshCw, HeartPulse, Play, PauseCircle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import {
   getChannelStatus,
@@ -9,8 +9,11 @@ import {
   getChannelHealthList,
   updateChannelHealth,
   refreshChannelHealth as refreshChannelHealthApi,
+  reportHeartbeat,
+  resumeChannel as resumeChannelApi,
+  updateFailureThreshold,
 } from '../api/channel';
-import type { Channel, ChannelHealth } from '../../shared/types';
+import type { Channel, ChannelHealth, ChannelStatus } from '../../shared/types';
 
 const channelTypes = [
   { value: 'wechat', label: '微信公众号', color: 'bg-green-500' },
@@ -39,9 +42,12 @@ export default function ChannelManage() {
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [name, setName] = useState('');
   const [type, setType] = useState('wechat');
-  const [status, setStatus] = useState<'active' | 'inactive'>('active');
+  const [status, setStatus] = useState<ChannelStatus>('active');
   const [config, setConfig] = useState('');
   const [saving, setSaving] = useState(false);
+  const [healthBusy, setHealthBusy] = useState<number | null>(null);
+  const [editingThreshold, setEditingThreshold] = useState(false);
+  const [thresholdInput, setThresholdInput] = useState('3');
 
   const loadData = async () => {
     setLoading(true);
@@ -157,6 +163,56 @@ export default function ChannelManage() {
     }
   };
 
+  const applyHealthUpdate = (channelId: number, health: ChannelHealth) => {
+    setChannelHealthData((prev) => ({ ...prev, [channelId]: health }));
+  };
+
+  const handleHeartbeat = async (channelId: number, fail = false) => {
+    setHealthBusy(channelId);
+    try {
+      const result = await reportHeartbeat(channelId, fail ? { status: 'fail', message: '手动上报：渠道发布异常' } : { status: 'ok' });
+      applyHealthUpdate(channelId, result.health);
+      if (result.degraded) {
+        alert('渠道连续失败已达到阈值，已自动降级暂停，相关任务转入失败复核队列');
+        await loadData();
+      }
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthBusy(null);
+    }
+  };
+
+  const handleResume = async (channelId: number) => {
+    setHealthBusy(channelId);
+    try {
+      const health = await resumeChannelApi(channelId);
+      applyHealthUpdate(channelId, health);
+      setChannels((prev) => prev.map((c) => (c.id === channelId ? { ...c, status: 'active' as ChannelStatus } : c)));
+      alert('渠道已恢复启用，可以重新排期');
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setHealthBusy(null);
+    }
+  };
+
+  const handleSaveThreshold = async () => {
+    if (!healthChannelId) return;
+    const threshold = parseInt(thresholdInput, 10);
+    if (!Number.isInteger(threshold) || threshold < 1 || threshold > 100) {
+      alert('降级阈值必须为 1-100 之间的整数');
+      return;
+    }
+    try {
+      const updated = await updateFailureThreshold(healthChannelId, threshold);
+      applyHealthUpdate(healthChannelId, updated);
+      setEditingThreshold(false);
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -200,16 +256,27 @@ export default function ChannelManage() {
                       <p className="text-sm text-gray-500">{typeInfo.label}</p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => toggleStatus(channel.id)}
-                    className={cn(
-                      'p-1.5 rounded-lg transition-colors',
-                      channel.status === 'active' ? 'text-green-600 hover:bg-green-50' : 'text-gray-400 hover:bg-gray-100'
-                    )}
-                    title={channel.status === 'active' ? '已启用，点击停用' : '已停用，点击启用'}
-                  >
-                    {channel.status === 'active' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
-                  </button>
+                  {channel.status === 'paused' ? (
+                    <button
+                      onClick={() => handleResume(channel.id)}
+                      disabled={healthBusy === channel.id}
+                      className="p-1.5 rounded-lg transition-colors text-red-600 hover:bg-red-50 disabled:opacity-50"
+                      title="渠道已降级暂停，心跳恢复后点击重新启用"
+                    >
+                      <PauseCircle className="w-5 h-5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => toggleStatus(channel.id)}
+                      className={cn(
+                        'p-1.5 rounded-lg transition-colors',
+                        channel.status === 'active' ? 'text-green-600 hover:bg-green-50' : 'text-gray-400 hover:bg-gray-100'
+                      )}
+                      title={channel.status === 'active' ? '已启用，点击停用' : '已停用，点击启用'}
+                    >
+                      {channel.status === 'active' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-4 mb-4 p-3 bg-gray-50 rounded-lg">
@@ -220,18 +287,50 @@ export default function ChannelManage() {
                   <span className="ml-auto text-xl font-bold text-[#1e3a5f]">{channel.today_schedule_count}</span>
                 </div>
 
+                {channel.status === 'paused' && (
+                  <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                    <div className="flex items-center gap-2 text-red-700 font-medium text-sm mb-1">
+                      <PauseCircle className="w-4 h-4" />
+                      渠道已降级暂停
+                    </div>
+                    <p className="text-xs text-red-600 mb-2">连续发布失败达到阈值，已暂停发布并转入失败复核。心跳恢复后可点击恢复。</p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleHeartbeat(channel.id); }}
+                        disabled={healthBusy === channel.id}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        <HeartPulse className="w-3.5 h-3.5" />
+                        上报心跳
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleResume(channel.id); }}
+                        disabled={healthBusy === channel.id}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        恢复启用
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {channelHealthData[channel.id] && (() => {
                   const health = channelHealthData[channel.id];
+                  const isPaused = !!health.degraded_at || channel.status === 'paused';
                   const healthColor = health.success_rate >= 0.8 ? 'text-green-600' : health.success_rate >= 0.5 ? 'text-yellow-600' : 'text-red-600';
-                  const rateLimitBadge = health.rate_limit_status === 'normal' ? (
+                  const rateLimitBadge = isPaused ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700"><PauseCircle className="w-3 h-3" />已降级</span>
+                  ) : health.rate_limit_status === 'normal' ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-green-100 text-green-700"><Shield className="w-3 h-3" />正常</span>
                   ) : health.rate_limit_status === 'limited' ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-yellow-100 text-yellow-700"><AlertTriangle className="w-3 h-3" />限流中</span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700"><XCircle className="w-3 h-3" />已阻断</span>
                   );
+                  const failureColor = health.consecutive_failures >= health.failure_threshold ? 'text-red-600' : health.consecutive_failures > 0 ? 'text-yellow-600' : 'text-gray-500';
                   return (
-                    <div className="space-y-2 mb-4 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => { setHealthChannelId(channel.id); setShowHealthModal(true); }}>
+                    <div className="space-y-2 mb-4 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => { setHealthChannelId(channel.id); setEditingThreshold(false); setShowHealthModal(true); }}>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Activity className="w-4 h-4 text-gray-400" />
@@ -239,15 +338,34 @@ export default function ChannelManage() {
                         </div>
                         <span className={cn('text-sm font-bold', healthColor)}>{(health.success_rate * 100).toFixed(0)}%</span>
                       </div>
-                      <div className="flex items-center gap-2">
-                        {rateLimitBadge}
-                        {health.responsible_person && (
-                          <span className="flex items-center gap-1 text-xs text-gray-500">
-                            <User className="w-3 h-3" />
-                            {health.responsible_person}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {rateLimitBadge}
+                          <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium', health.consecutive_failures > 0 ? 'bg-yellow-50' : 'bg-gray-100', failureColor)}>
+                            <AlertTriangle className="w-3 h-3" />
+                            连续失败 {health.consecutive_failures}/{health.failure_threshold}
                           </span>
-                        )}
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleHeartbeat(channel.id); }}
+                          disabled={healthBusy === channel.id}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                          title="上报渠道心跳"
+                        >
+                          <HeartPulse className="w-3.5 h-3.5" />
+                          心跳
+                        </button>
                       </div>
+                      <div className="flex items-center gap-1 text-xs text-gray-400">
+                        <HeartPulse className="w-3 h-3" />
+                        最近心跳：{health.last_heartbeat_at ? new Date(health.last_heartbeat_at).toLocaleString('zh-CN') : '暂无'}
+                      </div>
+                      {health.responsible_person && (
+                        <div className="flex items-center gap-1 text-xs text-gray-500">
+                          <User className="w-3 h-3" />
+                          {health.responsible_person}
+                        </div>
+                      )}
                       {health.last_failure_reason && (
                         <div className="flex items-center gap-1 text-xs text-red-500">
                           <AlertTriangle className="w-3 h-3" />
@@ -261,9 +379,13 @@ export default function ChannelManage() {
                 <div className="flex items-center gap-2">
                   <span className={cn(
                     'px-2.5 py-1 rounded-md text-xs font-medium flex-1 text-center',
-                    channel.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+                    channel.status === 'active'
+                      ? 'bg-green-100 text-green-700'
+                      : channel.status === 'paused'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-gray-100 text-gray-600'
                   )}>
-                    {channel.status === 'active' ? '已启用' : '已停用'}
+                    {channel.status === 'active' ? '已启用' : channel.status === 'paused' ? '降级暂停' : '已停用'}
                   </span>
                   <button
                     onClick={() => handleOpenDetail(channel)}
@@ -512,6 +634,23 @@ export default function ChannelManage() {
                   </div>
                 </div>
 
+                <div className="p-4 rounded-lg border" style={{ borderColor: healthChannel.status === 'paused' ? '#fca5a5' : '#e5e7eb', backgroundColor: healthChannel.status === 'paused' ? '#fef2f2' : '#f9fafb' }}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <PauseCircle className={cn('w-4 h-4', healthChannel.status === 'paused' ? 'text-red-500' : 'text-green-500')} />
+                      <span className="text-sm font-medium text-gray-700">渠道状态</span>
+                    </div>
+                    {healthChannel.status === 'paused' ? (
+                      <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700">降级暂停</span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-green-100 text-green-700">运行中</span>
+                    )}
+                  </div>
+                  {healthChannel.status === 'paused' && (
+                    <p className="text-xs text-red-600 mt-2">连续失败达到阈值已自动暂停。收到渠道心跳后，管理员可点击“恢复启用”。</p>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-4 bg-gray-50 rounded-lg">
                     <p className="text-sm text-gray-500 mb-2">限流状态</p>
@@ -547,6 +686,52 @@ export default function ChannelManage() {
                   </div>
                 </div>
 
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-2">连续失败 / 降级阈值</p>
+                    {editingThreshold ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-sm font-bold text-red-600">{health.consecutive_failures}</span>
+                        <span className="text-sm text-gray-400">/</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={thresholdInput}
+                          onChange={(e) => setThresholdInput(e.target.value)}
+                          className="w-16 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-1 focus:ring-[#1e3a5f] focus:border-[#1e3a5f] outline-none"
+                          autoFocus
+                        />
+                        <button
+                          onClick={handleSaveThreshold}
+                          className="text-xs text-[#1e3a5f] font-medium hover:underline"
+                        >
+                          保存
+                        </button>
+                      </div>
+                    ) : (
+                      <span
+                        className="flex items-center gap-1 text-sm text-gray-700 cursor-pointer hover:text-[#1e3a5f]"
+                        onClick={() => { setEditingThreshold(true); setThresholdInput(String(health.failure_threshold ?? 3)); }}
+                        title="点击修改降级阈值"
+                      >
+                        <AlertTriangle className={cn('w-3.5 h-3.5', health.consecutive_failures > 0 ? 'text-yellow-500' : 'text-gray-400')} />
+                        <span className={cn('font-bold', health.consecutive_failures >= health.failure_threshold ? 'text-red-600' : 'text-gray-700')}>
+                          {health.consecutive_failures}
+                        </span>
+                        <span className="text-gray-400">/ {health.failure_threshold} 次</span>
+                      </span>
+                    )}
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-500 mb-2">最近心跳</p>
+                    <span className="flex items-center gap-1 text-sm text-gray-700">
+                      <HeartPulse className={cn('w-3.5 h-3.5', health.last_heartbeat_at ? 'text-green-500' : 'text-gray-400')} />
+                      {health.last_heartbeat_at ? new Date(health.last_heartbeat_at).toLocaleString('zh-CN') : '暂无心跳'}
+                    </span>
+                  </div>
+                </div>
+
                 {health.last_failure_reason && (
                   <div className="p-4 bg-red-50 rounded-lg">
                     <div className="flex items-center gap-2 mb-1">
@@ -563,7 +748,25 @@ export default function ChannelManage() {
                 </div>
               </div>
 
-              <div className="flex gap-4 mt-8">
+              <div className="flex gap-3 mt-8 flex-wrap">
+                <button
+                  onClick={() => handleHeartbeat(healthChannel.id)}
+                  disabled={healthBusy === healthChannel.id}
+                  className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <HeartPulse className="w-4 h-4" />
+                  上报心跳
+                </button>
+                {healthChannel.status === 'paused' && (
+                  <button
+                    onClick={() => handleResume(healthChannel.id)}
+                    disabled={healthBusy === healthChannel.id}
+                    className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-red-600 text-white hover:bg-red-700 transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <Play className="w-4 h-4" />
+                    恢复启用
+                  </button>
+                )}
                 <button
                   onClick={handleRefreshHealth}
                   className="flex-1 py-2.5 px-4 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors inline-flex items-center justify-center gap-2"
@@ -572,7 +775,7 @@ export default function ChannelManage() {
                   刷新健康度
                 </button>
                 <button
-                  onClick={() => { setShowHealthModal(false); setEditingResponsible(false); }}
+                  onClick={() => { setShowHealthModal(false); setEditingResponsible(false); setEditingThreshold(false); }}
                   className="flex-1 py-2.5 px-4 rounded-lg font-medium bg-[#1e3a5f] text-white hover:bg-[#2d4a6f] transition-colors"
                 >
                   关闭

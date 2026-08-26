@@ -1,6 +1,11 @@
 import { get, post, put, del } from '../utils/request';
 import type { Channel, ChannelHealth, ScheduleRiskWarning, PaginationResult, PaginationParams } from '../types';
 
+export interface HeartbeatResult {
+  health: ChannelHealth;
+  degraded: boolean;
+}
+
 export const getChannelList = (params?: PaginationParams & { status?: string; type?: string }): Promise<PaginationResult<Channel>> => {
   return get<PaginationResult<Channel>>('/channel', params as Record<string, string | number | boolean | undefined>);
 };
@@ -53,4 +58,20 @@ export const refreshChannelHealth = (channelId: number): Promise<ChannelHealth> 
 
 export const getHighRiskChannels = (): Promise<ScheduleRiskWarning[]> => {
   return get<ScheduleRiskWarning[]>('/channel/risk/high');
+};
+
+export const reportHeartbeat = (channelId: number, data?: { status?: 'ok' | 'fail'; message?: string }): Promise<HeartbeatResult> => {
+  return post<HeartbeatResult>(`/channel/${channelId}/health/heartbeat`, data || {});
+};
+
+export const resumeChannel = (channelId: number): Promise<ChannelHealth> => {
+  return post<ChannelHealth>(`/channel/${channelId}/resume`);
+};
+
+export const getDegradedChannels = (): Promise<ChannelHealth[]> => {
+  return get<ChannelHealth[]>('/channel/degraded');
+};
+
+export const updateFailureThreshold = (channelId: number, failureThreshold: number): Promise<ChannelHealth> => {
+  return put<ChannelHealth>(`/channel/${channelId}/health`, { failure_threshold: failureThreshold });
 };

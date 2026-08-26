@@ -19,17 +19,21 @@ export interface User {
 
 export type RateLimitStatus = 'normal' | 'limited' | 'blocked';
 
+export type ChannelStatus = 'active' | 'inactive' | 'paused';
+
 export type FailureReviewStatus = 'pending' | 'resolved';
 
-export type FailureReviewAction = 'republish' | 'manual_publish';
+export type FailureReviewAction = 'republish' | 'manual_publish' | 'reschedule';
 
 export type ReviewAuditAction = 'create' | 'override';
+
+export type AuditTargetType = 'channel' | 'channel_health' | 'schedule' | 'publish_record' | 'failure_review';
 
 export interface Channel {
   id: number;
   name: string;
   type: string;
-  status: 'active' | 'inactive';
+  status: ChannelStatus;
   config?: string;
 }
 
@@ -40,8 +44,23 @@ export interface ChannelHealth {
   last_failure_reason: string | null;
   rate_limit_status: RateLimitStatus;
   responsible_person: string | null;
+  last_heartbeat_at: string | null;
+  consecutive_failures: number;
+  failure_threshold: number;
+  degraded_at: string | null;
   updated_at: string;
   channel?: Channel;
+}
+
+export interface AuditLog {
+  id: number;
+  operator_id: number | null;
+  action: string;
+  target_type: AuditTargetType | string;
+  target_id: number | null;
+  detail: string | null;
+  created_at: string;
+  operator?: User;
 }
 
 export interface SensitiveWord {
@@ -120,11 +139,13 @@ export interface FailureReview {
   handler_id: number | null;
   conclusion: string | null;
   action_type: FailureReviewAction | null;
+  reason: string | null;
   status: FailureReviewStatus;
   created_at: string;
   resolved_at: string | null;
   handler?: User;
   publish_record?: PublishRecord;
+  schedule?: Schedule;
 }
 
 export interface ScheduleRiskWarning {
@@ -201,6 +222,25 @@ export interface UpdateScheduleRequest {
 
 export interface ReviewRequest {
   opinion: string;
+}
+
+export interface HeartbeatRequest {
+  status?: 'ok' | 'fail';
+  message?: string;
+}
+
+export interface ResolveFailureReviewRequest {
+  conclusion: string;
+  action_type: FailureReviewAction;
+  schedule_time?: string;
+}
+
+export interface UpdateChannelHealthRequest {
+  success_rate?: number;
+  last_failure_reason?: string | null;
+  rate_limit_status?: RateLimitStatus;
+  responsible_person?: string | null;
+  failure_threshold?: number;
 }
 
 export interface DashboardStats {

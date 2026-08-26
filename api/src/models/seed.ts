@@ -68,7 +68,9 @@ export function seedData(): void {
     'INSERT OR IGNORE INTO sensitive_words (word, category, version, is_active) VALUES (?, ?, ?, ?)'
   );
   const insertChannelHealth = db.prepare(
-    'INSERT OR IGNORE INTO channel_health (channel_id, success_rate, rate_limit_status, responsible_person, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)'
+    `INSERT OR IGNORE INTO channel_health
+      (channel_id, success_rate, rate_limit_status, responsible_person, last_heartbeat_at, consecutive_failures, failure_threshold, degraded_at, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 0, 3, NULL, CURRENT_TIMESTAMP)`
   );
 
   const transaction = db.transaction(() => {

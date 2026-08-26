@@ -1,17 +1,17 @@
 import db, { transaction } from '../db/index.js'
-import type { Channel, PaginationParams, PaginationResult } from '../../../shared/types.js'
+import type { Channel, ChannelStatus, PaginationParams, PaginationResult } from '../../../shared/types.js'
 
 export interface CreateChannelParams {
   name: string
   type: string
-  status?: 'active' | 'inactive'
+  status?: ChannelStatus
   config?: string
 }
 
 export interface UpdateChannelParams {
   name?: string
   type?: string
-  status?: 'active' | 'inactive'
+  status?: ChannelStatus
   config?: string
 }
 
@@ -76,7 +76,7 @@ export async function findActiveChannels(): Promise<Channel[]> {
 }
 
 export async function findByStatus(
-  status: 'active' | 'inactive',
+  status: ChannelStatus,
   params?: PaginationParams,
 ): Promise<PaginationResult<Channel>> {
   const page = params?.page || 1
@@ -128,7 +128,7 @@ export async function findByName(name: string): Promise<Channel | null> {
   return stmt.get(name) as Channel | null
 }
 
-export async function countByStatus(status: 'active' | 'inactive'): Promise<number> {
+export async function countByStatus(status: ChannelStatus): Promise<number> {
   const stmt = db.prepare('SELECT COUNT(*) as count FROM channels WHERE status = ?')
   const result = stmt.get(status) as { count: number }
   return result.count
@@ -177,7 +177,7 @@ export async function update(id: number, params: UpdateChannelParams): Promise<C
   })
 }
 
-export async function updateStatus(id: number, status: 'active' | 'inactive'): Promise<Channel | null> {
+export async function updateStatus(id: number, status: ChannelStatus): Promise<Channel | null> {
   return update(id, { status })
 }
 

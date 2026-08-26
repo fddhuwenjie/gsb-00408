@@ -5,11 +5,14 @@ import { createError } from '../types/index.js'
 import ChannelModel from '../models/Channel.js'
 import ScheduleModel from '../models/Schedule.js'
 import ChannelService from '../services/ChannelService.js'
+import * as HealthService from '../services/HealthService.js'
 import type {
   Channel,
+  ChannelHealth,
   PaginationParams,
   PaginationResult,
   ApiResponse,
+  HeartbeatRequest,
 } from '../../../shared/types.js'
 
 const router = Router()
@@ -209,21 +212,43 @@ router.put(
   '/:id/health',
   requireRole('admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) throw createError('无效的渠道ID', 400)
-    const { success_rate, last_failure_reason, rate_limit_status, responsible_person } = req.body as {
+    const { success_rate, last_failure_reason, rate_limit_status, responsible_person, failure_threshold } = req.body as {
       success_rate?: number
       last_failure_reason?: string
       rate_limit_status?: string
       responsible_person?: string
+      failure_threshold?: number
     }
-    const updated = await ChannelService.updateChannelHealth(id, {
-      success_rate,
-      last_failure_reason,
-      rate_limit_status: rate_limit_status as 'normal' | 'limited' | 'blocked' | undefined,
-      responsible_person,
-    })
-    const response: ApiResponse<typeof updated> = {
+
+    let updated: ChannelHealth
+    if (failure_threshold !== undefined) {
+      updated = await HealthService.updateFailureThreshold(id, Number(failure_threshold), req.user.id)
+      if (
+        success_rate !== undefined ||
+        last_failure_reason !== undefined ||
+        rate_limit_status !== undefined ||
+        responsible_person !== undefined
+      ) {
+        updated = await ChannelService.updateChannelHealth(id, {
+          success_rate,
+          last_failure_reason,
+          rate_limit_status: rate_limit_status as 'normal' | 'limited' | 'blocked' | undefined,
+          responsible_person,
+        })
+      }
+    } else {
+      updated = await ChannelService.updateChannelHealth(id, {
+        success_rate,
+        last_failure_reason,
+        rate_limit_status: rate_limit_status as 'normal' | 'limited' | 'blocked' | undefined,
+        responsible_person,
+      })
+    }
+
+    const response: ApiResponse<ChannelHealth> = {
       success: true,
       data: updated,
     }
@@ -241,6 +266,52 @@ router.post(
     const response: ApiResponse<typeof health> = {
       success: true,
       data: health,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/health/heartbeat',
+  requireRole('editor', 'reviewer', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const { status, message } = (req.body || {}) as HeartbeatRequest
+    const result = await HealthService.reportHeartbeat(id, req.user.id, { status, message })
+    const response: ApiResponse<typeof result> = {
+      success: true,
+      data: result,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/resume',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const health = await HealthService.resumeChannel(id, req.user.id)
+    const response: ApiResponse<ChannelHealth> = {
+      success: true,
+      data: health,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.get(
+  '/degraded',
+  requireRole('editor', 'reviewer', 'admin'),
+  asyncHandler(async (_req: Request, res: Response): Promise<void> => {
+    const degraded = await HealthService.getDegradedChannels()
+    const response: ApiResponse<ChannelHealth[]> = {
+      success: true,
+      data: degraded,
     }
     res.status(200).json(response)
   }),

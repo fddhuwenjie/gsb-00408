@@ -6,16 +6,17 @@ import ScheduleModel from '../models/Schedule.js'
 import type {
   Channel,
   ChannelHealth,
+  ChannelStatus,
   PaginationParams,
   RateLimitStatus,
   ScheduleRiskWarning,
 } from '../../../shared/types.js'
 
-interface ChannelStatus {
+interface ChannelStatusInfo {
   id: number
   name: string
   type: string
-  status: 'active' | 'inactive'
+  status: ChannelStatus
   today_schedules: number
   total_schedules: number
   success_rate: number
@@ -144,8 +145,9 @@ export async function deleteChannel(
   }
 }
 
-export async function getChannelStatus(): Promise<ChannelStatus[]> {
-  const channels = await ChannelModel.findActiveChannels()
+export async function getChannelStatus(): Promise<ChannelStatusInfo[]> {
+  const allChannels = await ChannelModel.findAll({ page: 1, pageSize: 1000 })
+  const channels = allChannels.items.filter((c) => c.status !== 'inactive')
   const today = new Date()
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString()
   const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1).toISOString()
