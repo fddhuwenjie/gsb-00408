@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Clock, Calendar, AlertTriangle, TrendingUp, FileText, ChevronRight, Eye, Check, X } from 'lucide-react';
+import { Clock, Calendar, AlertTriangle, TrendingUp, FileText, ChevronRight, Eye, Check, X, Pause } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { getDashboardStats, getDashboardPending, getDashboardRecentSchedules } from '../api/dashboard';
 import type { DashboardStats, Content, Schedule, ContentType } from '../../shared/types';
@@ -47,6 +47,7 @@ export default function Dashboard() {
     { title: '敏感词命中', value: stats.sensitive_hit_count, icon: AlertTriangle, color: 'from-red-400 to-red-600', suffix: '次' },
     { title: '发布成功率', value: stats.publish_success_rate, icon: TrendingUp, color: 'from-green-400 to-green-600', suffix: '%' },
     { title: '高风险渠道', value: stats.high_risk_channel_count, icon: AlertTriangle, color: 'from-red-500 to-red-700', suffix: '个' },
+    { title: '已降级渠道', value: stats.degraded_channel_count, icon: Pause, color: 'from-orange-500 to-orange-700', suffix: '个' },
     { title: '待复盘', value: stats.pending_failure_review_count, icon: Clock, color: 'from-yellow-500 to-yellow-700', suffix: '条' },
   ] : [];
 
@@ -66,7 +67,7 @@ export default function Dashboard() {
           <p className="text-gray-500 mt-1">欢迎回来，查看今日运营数据</p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 md:gap-6 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6 mb-8">
           {statCards.map((card, index) => (
             <div
               key={card.title}

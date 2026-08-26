@@ -21,7 +21,7 @@ export const getFailureReviews = (params?: PaginationParams & { status?: string;
   return get<PaginationResult<FailureReview>>('/failure-reviews', params as Record<string, string | number | boolean | undefined>);
 };
 
-export const resolveFailureReview = (id: number, conclusion: string, actionType: 'republish' | 'manual_publish'): Promise<FailureReview> => {
+export const resolveFailureReview = (id: number, conclusion: string, actionType: 'republish' | 'manual_publish' | 'reschedule'): Promise<FailureReview> => {
   return post<FailureReview>(`/failure-reviews/${id}/resolve`, { conclusion, action_type: actionType });
 };
 

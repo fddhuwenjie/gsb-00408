@@ -5,6 +5,8 @@ import { createError } from '../types/index.js'
 import ChannelModel from '../models/Channel.js'
 import ScheduleModel from '../models/Schedule.js'
 import ChannelService from '../services/ChannelService.js'
+import HealthCheckService from '../services/HealthCheckService.js'
+import AuditLogModel from '../models/AuditLog.js'
 import type {
   Channel,
   PaginationParams,
@@ -191,6 +193,19 @@ router.get(
 )
 
 router.get(
+  '/degraded',
+  requireRole('editor', 'reviewer', 'admin'),
+  asyncHandler(async (_req: Request, res: Response): Promise<void> => {
+    const degraded = await HealthCheckService.getDegradedChannels()
+    const response: ApiResponse<typeof degraded> = {
+      success: true,
+      data: degraded,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.get(
   '/:id/health',
   requireRole('editor', 'reviewer', 'admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
@@ -209,20 +224,56 @@ router.put(
   '/:id/health',
   requireRole('admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) throw createError('无效的渠道ID', 400)
-    const { success_rate, last_failure_reason, rate_limit_status, responsible_person } = req.body as {
+    const {
+      success_rate,
+      last_failure_reason,
+      rate_limit_status,
+      responsible_person,
+      is_health_check_enabled,
+      degradation_threshold,
+    } = req.body as {
       success_rate?: number
       last_failure_reason?: string
       rate_limit_status?: string
       responsible_person?: string
+      is_health_check_enabled?: boolean
+      degradation_threshold?: number
     }
+
+    const channel = await ChannelModel.findById(id)
+    if (!channel) throw createError('渠道不存在', 404)
+
     const updated = await ChannelService.updateChannelHealth(id, {
       success_rate,
       last_failure_reason,
       rate_limit_status: rate_limit_status as 'normal' | 'limited' | 'blocked' | undefined,
       responsible_person,
+      is_health_check_enabled,
+      degradation_threshold,
     })
+
+    const changes: string[] = []
+    if (success_rate !== undefined) changes.push(`成功率: ${(success_rate * 100).toFixed(0)}%`)
+    if (rate_limit_status !== undefined) changes.push(`限流状态: ${rate_limit_status}`)
+    if (responsible_person !== undefined) changes.push(`负责人: ${responsible_person || '未设置'}`)
+    if (is_health_check_enabled !== undefined) changes.push(`健康检查: ${is_health_check_enabled ? '启用' : '禁用'}`)
+    if (degradation_threshold !== undefined) changes.push(`降级阈值: ${degradation_threshold}`)
+    if (last_failure_reason !== undefined) changes.push(`失败原因: ${last_failure_reason || '已清除'}`)
+
+    if (changes.length > 0) {
+      await AuditLogModel.create({
+        operator_id: req.user.id,
+        action: 'channel_health_config',
+        resource_type: 'channel',
+        resource_id: id,
+        detail: `更新渠道 ${channel.name} 健康信息 - ${changes.join(', ')}`,
+        ip_address: req.ip,
+      })
+    }
+
     const response: ApiResponse<typeof updated> = {
       success: true,
       data: updated,
@@ -232,12 +283,130 @@ router.put(
 )
 
 router.post(
-  '/:id/health/refresh',
+  '/:id/heartbeat',
+  requireRole('editor', 'reviewer', 'admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const result = await HealthCheckService.recordHeartbeat(
+      id,
+      req.user.id,
+      req.ip,
+    )
+    const response: ApiResponse<typeof result> = {
+      success: true,
+      data: result,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.put(
+  '/:id/health/config',
   requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const { is_health_check_enabled, degradation_threshold } = req.body as {
+      is_health_check_enabled?: boolean
+      degradation_threshold?: number
+    }
+    const updated = await HealthCheckService.updateHealthConfig(
+      id,
+      { is_health_check_enabled, degradation_threshold },
+      req.user.id,
+      req.ip,
+    )
+    const response: ApiResponse<typeof updated> = {
+      success: true,
+      data: updated,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/degrade',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const { reason } = req.body as { reason: string }
+    if (!reason || reason.trim().length === 0) {
+      throw createError('降级原因不能为空', 400)
+    }
+    const health = await HealthCheckService.degradeChannelManually(
+      id,
+      reason,
+      req.user.id,
+      req.ip,
+    )
+    const response: ApiResponse<typeof health> = {
+      success: true,
+      data: health,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/restore',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const health = await HealthCheckService.restoreChannel(
+      id,
+      req.user.id,
+      req.ip,
+    )
+    const response: ApiResponse<typeof health> = {
+      success: true,
+      data: health,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.get(
+  '/:id/audit-logs',
+  requireRole('editor', 'reviewer', 'admin'),
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const page = req.query.page ? parseInt(req.query.page as string) : 1
+    const pageSize = req.query.pageSize ? parseInt(req.query.pageSize as string) : 20
+    const result = await AuditLogModel.findByResource('channel', id, { page, pageSize })
+    const response: ApiResponse<typeof result> = {
+      success: true,
+      data: result,
+    }
+    res.status(200).json(response)
+  }),
+)
+
+router.post(
+  '/:id/health/refresh',
+  requireRole('admin'),
+  asyncHandler(async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) throw createError('用户未登录', 401)
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) throw createError('无效的渠道ID', 400)
+    const channel = await ChannelModel.findById(id)
+    if (!channel) throw createError('渠道不存在', 404)
     const health = await ChannelService.refreshChannelHealth(id)
+    await AuditLogModel.create({
+      operator_id: req.user.id,
+      action: 'channel_health_config',
+      resource_type: 'channel',
+      resource_id: id,
+      detail: `刷新渠道 ${channel.name} 健康度统计`,
+      ip_address: req.ip,
+    })
     const response: ApiResponse<typeof health> = {
       success: true,
       data: health,

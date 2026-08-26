@@ -8,6 +8,12 @@ interface ChannelHealthRow {
   last_failure_reason: string | null
   rate_limit_status: RateLimitStatus
   responsible_person: string | null
+  is_health_check_enabled: number
+  last_heartbeat: string | null
+  consecutive_failures: number
+  degradation_threshold: number
+  is_degraded: number
+  degraded_at: string | null
   updated_at: string
   c_id?: number | null
   c_name?: string | null
@@ -23,6 +29,7 @@ export interface CreateChannelHealthParams {
   last_failure_reason?: string | null
   rate_limit_status?: RateLimitStatus
   responsible_person?: string | null
+  degradation_threshold?: number
 }
 
 export interface UpdateChannelHealthParams {
@@ -30,11 +37,15 @@ export interface UpdateChannelHealthParams {
   last_failure_reason?: string | null
   rate_limit_status?: RateLimitStatus
   responsible_person?: string | null
+  is_health_check_enabled?: boolean
+  degradation_threshold?: number
 }
 
 const CHANNEL_FIELDS = `
   ch.id, ch.channel_id, ch.success_rate, ch.last_failure_reason,
-  ch.rate_limit_status, ch.responsible_person, ch.updated_at
+  ch.rate_limit_status, ch.responsible_person, ch.updated_at,
+  ch.is_health_check_enabled, ch.last_heartbeat, ch.consecutive_failures,
+  ch.degradation_threshold, ch.is_degraded, ch.degraded_at
 `
 
 const CHANNEL_JOIN = `
@@ -54,14 +65,21 @@ function mapRow(row: unknown): ChannelHealth {
       config: c_config ?? null,
     }
   }
-  return health as ChannelHealth
+  const result = health as unknown as ChannelHealth
+  result.is_health_check_enabled = r.is_health_check_enabled === 1
+  result.is_degraded = r.is_degraded === 1
+  return result
 }
 
 export async function create(params: CreateChannelHealthParams): Promise<ChannelHealth> {
   return transaction((tx) => {
     const stmt = tx.prepare(`
-      INSERT INTO channel_health (channel_id, success_rate, last_failure_reason, rate_limit_status, responsible_person, updated_at)
-      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO channel_health (
+        channel_id, success_rate, last_failure_reason, rate_limit_status,
+        responsible_person, is_health_check_enabled, last_heartbeat,
+        consecutive_failures, degradation_threshold, is_degraded, degraded_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     `)
     const result = stmt.run(
       params.channel_id,
@@ -69,6 +87,12 @@ export async function create(params: CreateChannelHealthParams): Promise<Channel
       params.last_failure_reason ?? null,
       params.rate_limit_status ?? 'normal',
       params.responsible_person ?? null,
+      1,
+      new Date().toISOString(),
+      0,
+      params.degradation_threshold ?? 3,
+      0,
+      null,
     )
     const id = result.lastInsertRowid as number
     const selectStmt = tx.prepare(`
@@ -127,7 +151,7 @@ export async function findAll(params?: PaginationParams): Promise<PaginationResu
 export async function update(id: number, params: UpdateChannelHealthParams): Promise<ChannelHealth | null> {
   return transaction((tx) => {
     const fields: string[] = []
-    const values: (string | number | null | undefined)[] = []
+    const values: (string | number | boolean | null | undefined)[] = []
 
     if (params.success_rate !== undefined) {
       fields.push('success_rate = ?')
@@ -144,6 +168,14 @@ export async function update(id: number, params: UpdateChannelHealthParams): Pro
     if (params.responsible_person !== undefined) {
       fields.push('responsible_person = ?')
       values.push(params.responsible_person ?? null)
+    }
+    if (params.is_health_check_enabled !== undefined) {
+      fields.push('is_health_check_enabled = ?')
+      values.push(params.is_health_check_enabled ? 1 : 0)
+    }
+    if (params.degradation_threshold !== undefined) {
+      fields.push('degradation_threshold = ?')
+      values.push(params.degradation_threshold)
     }
 
     const selectStmt = tx.prepare(`
@@ -173,6 +205,135 @@ export async function updateByChannelId(channelId: number, params: UpdateChannel
   const health = await findByChannelId(channelId)
   if (!health) return null
   return update(health.id, params)
+}
+
+export async function recordHeartbeat(channelId: number): Promise<ChannelHealth | null> {
+  return transaction((tx) => {
+    const now = new Date().toISOString()
+    tx.prepare(`
+      UPDATE channel_health
+      SET last_heartbeat = ?, consecutive_failures = 0, is_degraded = 0, degraded_at = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE channel_id = ?
+    `).run(now, channelId)
+
+    const selectStmt = tx.prepare(`
+      SELECT ${CHANNEL_FIELDS}, c.id as c_id, c.name as c_name, c.type as c_type, c.status as c_status, c.config as c_config
+      FROM channel_health ch
+      ${CHANNEL_JOIN}
+      WHERE ch.channel_id = ?
+    `)
+    return mapRow(selectStmt.get(channelId))
+  })
+}
+
+export async function recordFailure(channelId: number, reason: string): Promise<ChannelHealth | null> {
+  const healthBefore = await findByChannelId(channelId)
+
+  db.prepare(`
+    UPDATE channel_health
+    SET consecutive_failures = consecutive_failures + 1,
+        last_failure_reason = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE channel_id = ?
+  `).run(reason, channelId)
+
+  if (healthBefore && healthBefore.is_health_check_enabled) {
+    const healthAfter = await findByChannelId(channelId)
+    if (healthAfter && healthAfter.consecutive_failures >= healthAfter.degradation_threshold && !healthAfter.is_degraded) {
+      db.prepare(`
+        UPDATE channel_health
+        SET is_degraded = 1, degraded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE channel_id = ?
+      `).run(channelId)
+    }
+  }
+
+  return findByChannelId(channelId)
+}
+
+export async function recordSuccess(channelId: number): Promise<ChannelHealth | null> {
+  return transaction((tx) => {
+    tx.prepare(`
+      UPDATE channel_health
+      SET consecutive_failures = 0,
+          last_failure_reason = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE channel_id = ?
+    `).run(channelId)
+
+    const selectStmt = tx.prepare(`
+      SELECT ${CHANNEL_FIELDS}, c.id as c_id, c.name as c_name, c.type as c_type, c.status as c_status, c.config as c_config
+      FROM channel_health ch
+      ${CHANNEL_JOIN}
+      WHERE ch.channel_id = ?
+    `)
+    return mapRow(selectStmt.get(channelId))
+  })
+}
+
+export async function degradeChannel(channelId: number, reason: string): Promise<ChannelHealth | null> {
+  return transaction((tx) => {
+    tx.prepare(`
+      UPDATE channel_health
+      SET is_degraded = 1, degraded_at = CURRENT_TIMESTAMP,
+          last_failure_reason = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE channel_id = ?
+    `).run(reason, channelId)
+
+    const selectStmt = tx.prepare(`
+      SELECT ${CHANNEL_FIELDS}, c.id as c_id, c.name as c_name, c.type as c_type, c.status as c_status, c.config as c_config
+      FROM channel_health ch
+      ${CHANNEL_JOIN}
+      WHERE ch.channel_id = ?
+    `)
+    return mapRow(selectStmt.get(channelId))
+  })
+}
+
+export async function restoreChannel(channelId: number): Promise<ChannelHealth | null> {
+  return transaction((tx) => {
+    tx.prepare(`
+      UPDATE channel_health
+      SET is_degraded = 0, degraded_at = NULL, consecutive_failures = 0,
+          last_failure_reason = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE channel_id = ?
+    `).run(channelId)
+
+    const selectStmt = tx.prepare(`
+      SELECT ${CHANNEL_FIELDS}, c.id as c_id, c.name as c_name, c.type as c_type, c.status as c_status, c.config as c_config
+      FROM channel_health ch
+      ${CHANNEL_JOIN}
+      WHERE ch.channel_id = ?
+    `)
+    return mapRow(selectStmt.get(channelId))
+  })
+}
+
+export async function findDegradedChannels(): Promise<ChannelHealth[]> {
+  const stmt = db.prepare(`
+    SELECT ${CHANNEL_FIELDS}, c.id as c_id, c.name as c_name, c.type as c_type, c.status as c_status, c.config as c_config
+    FROM channel_health ch
+    ${CHANNEL_JOIN}
+    WHERE ch.is_degraded = 1
+    ORDER BY ch.degraded_at DESC
+  `)
+  const rows = stmt.all() as ChannelHealthRow[]
+  return rows.map(mapRow)
+}
+
+export async function findStaleHeartbeatChannels(thresholdMinutes: number): Promise<ChannelHealth[]> {
+  const threshold = new Date(Date.now() - thresholdMinutes * 60 * 1000).toISOString()
+  const stmt = db.prepare(`
+    SELECT ${CHANNEL_FIELDS}, c.id as c_id, c.name as c_name, c.type as c_type, c.status as c_status, c.config as c_config
+    FROM channel_health ch
+    ${CHANNEL_JOIN}
+    WHERE ch.is_health_check_enabled = 1
+      AND ch.is_degraded = 0
+      AND (ch.last_heartbeat IS NULL OR ch.last_heartbeat < ?)
+    ORDER BY ch.last_heartbeat ASC
+  `)
+  const rows = stmt.all(threshold) as ChannelHealthRow[]
+  return rows.map(mapRow)
 }
 
 export async function recalculate(channelId: number): Promise<ChannelHealth | null> {
@@ -223,6 +384,12 @@ export async function countByRateLimitStatus(status: RateLimitStatus): Promise<n
   return result.count
 }
 
+export async function countDegraded(): Promise<number> {
+  const stmt = db.prepare('SELECT COUNT(*) as count FROM channel_health WHERE is_degraded = 1')
+  const result = stmt.get() as { count: number }
+  return result.count
+}
+
 export default {
   create,
   findById,
@@ -230,6 +397,14 @@ export default {
   findAll,
   update,
   updateByChannelId,
+  recordHeartbeat,
+  recordFailure,
+  recordSuccess,
+  degradeChannel,
+  restoreChannel,
+  findDegradedChannels,
+  findStaleHeartbeatChannels,
   recalculate,
   countByRateLimitStatus,
+  countDegraded,
 }

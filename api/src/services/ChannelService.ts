@@ -232,11 +232,19 @@ export async function updateChannelHealth(
     last_failure_reason?: string | null
     rate_limit_status?: RateLimitStatus
     responsible_person?: string | null
+    is_health_check_enabled?: boolean
+    degradation_threshold?: number
   },
 ): Promise<ChannelHealth> {
   const channel = await ChannelModel.findById(channelId)
   if (!channel) {
     throw createError('渠道不存在', 404, 'CHANNEL_NOT_FOUND')
+  }
+
+  if (data.degradation_threshold !== undefined) {
+    if (data.degradation_threshold < 1 || data.degradation_threshold > 100) {
+      throw createError('降级阈值必须在1-100之间', 400, 'INVALID_THRESHOLD')
+    }
   }
 
   const updated = await ChannelHealthModel.updateByChannelId(channelId, data)

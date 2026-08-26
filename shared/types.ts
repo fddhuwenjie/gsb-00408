@@ -4,7 +4,7 @@ export type ContentType = 'article' | 'video' | 'poster';
 
 export type ContentStatus = 'draft' | 'pending_review' | 'review_approved' | 'review_rejected' | 'scheduled' | 'published' | 'withdrawn';
 
-export type ScheduleStatus = 'pending' | 'approved' | 'rejected' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'withdrawn';
+export type ScheduleStatus = 'pending' | 'approved' | 'rejected' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'withdrawn' | 'pending_review';
 
 export type ReviewDecision = 'approve' | 'reject';
 
@@ -21,9 +21,23 @@ export type RateLimitStatus = 'normal' | 'limited' | 'blocked';
 
 export type FailureReviewStatus = 'pending' | 'resolved';
 
-export type FailureReviewAction = 'republish' | 'manual_publish';
+export type FailureReviewAction = 'republish' | 'manual_publish' | 'reschedule';
 
 export type ReviewAuditAction = 'create' | 'override';
+
+export type ChannelHealthStatus = 'healthy' | 'degraded' | 'paused';
+
+export type AuditAction =
+  | 'channel_heartbeat'
+  | 'channel_degrade'
+  | 'channel_restore'
+  | 'channel_health_config'
+  | 'schedule_publish_blocked'
+  | 'schedule_pending_review'
+  | 'schedule_reschedule'
+  | 'failure_review_resolve'
+  | 'failure_review_reschedule'
+  | 'health_check_performed';
 
 export interface Channel {
   id: number;
@@ -41,6 +55,12 @@ export interface ChannelHealth {
   rate_limit_status: RateLimitStatus;
   responsible_person: string | null;
   updated_at: string;
+  is_health_check_enabled: boolean;
+  last_heartbeat: string | null;
+  consecutive_failures: number;
+  degradation_threshold: number;
+  is_degraded: boolean;
+  degraded_at: string | null;
   channel?: Channel;
 }
 
@@ -115,16 +135,30 @@ export interface ReviewAuditTrail {
 
 export interface FailureReview {
   id: number;
-  publish_record_id: number;
+  publish_record_id: number | null;
   schedule_id: number;
   handler_id: number | null;
   conclusion: string | null;
   action_type: FailureReviewAction | null;
   status: FailureReviewStatus;
+  reason: string | null;
   created_at: string;
   resolved_at: string | null;
   handler?: User;
   publish_record?: PublishRecord;
+  schedule?: Schedule;
+}
+
+export interface AuditLog {
+  id: number;
+  operator_id: number | null;
+  action: AuditAction;
+  resource_type: string;
+  resource_id: number | null;
+  detail: string | null;
+  ip_address: string | null;
+  created_at: string;
+  operator?: User;
 }
 
 export interface ScheduleRiskWarning {
@@ -210,6 +244,7 @@ export interface DashboardStats {
   publish_success_rate: number;
   high_risk_channel_count: number;
   pending_failure_review_count: number;
+  degraded_channel_count: number;
 }
 
 export interface ScheduleWithRiskWarning {
